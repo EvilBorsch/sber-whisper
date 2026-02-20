@@ -1,5 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -234,24 +236,31 @@ fn find_python_script(app: &AppHandle) -> Result<PathBuf, String> {
     let mut checked: Vec<PathBuf> = Vec::new();
     let mut candidates: Vec<PathBuf> = vec![
         PathBuf::from("python").join("asr_service.py"),
+        PathBuf::from("_up_").join("python").join("asr_service.py"),
         PathBuf::from("..").join("python").join("asr_service.py"),
+        PathBuf::from("..").join("_up_").join("python").join("asr_service.py"),
         PathBuf::from("..").join("..").join("python").join("asr_service.py"),
     ];
 
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("python").join("asr_service.py"));
+        candidates.push(cwd.join("_up_").join("python").join("asr_service.py"));
         candidates.push(cwd.join("..").join("python").join("asr_service.py"));
+        candidates.push(cwd.join("..").join("_up_").join("python").join("asr_service.py"));
     }
 
     if let Ok(exe_path) = std::env::current_exe() {
         for base in exe_path.ancestors().take(7) {
             candidates.push(base.join("python").join("asr_service.py"));
+            candidates.push(base.join("_up_").join("python").join("asr_service.py"));
             candidates.push(base.join("..").join("python").join("asr_service.py"));
+            candidates.push(base.join("..").join("_up_").join("python").join("asr_service.py"));
         }
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("python").join("asr_service.py"));
+        candidates.push(resource_dir.join("_up_").join("python").join("asr_service.py"));
         candidates.push(resource_dir.join("asr_service.py"));
     }
 
@@ -283,14 +292,26 @@ fn sidecar_binary_name() -> &'static str {
     }
 }
 
-fn find_sidecar_binary(app: &AppHandle) -> Option<PathBuf> {
+fn find_sidecar_binary(app: &AppHandle) -> Result<PathBuf, String> {
     let binary = sidecar_binary_name();
+    let mut checked: Vec<PathBuf> = Vec::new();
     let mut candidates: Vec<PathBuf> = vec![
         PathBuf::from("python")
             .join("dist")
             .join("sber-whisper-sidecar")
             .join(binary),
+        PathBuf::from("_up_")
+            .join("python")
+            .join("dist")
+            .join("sber-whisper-sidecar")
+            .join(binary),
         PathBuf::from("..")
+            .join("python")
+            .join("dist")
+            .join("sber-whisper-sidecar")
+            .join(binary),
+        PathBuf::from("..")
+            .join("_up_")
             .join("python")
             .join("dist")
             .join("sber-whisper-sidecar")
@@ -310,11 +331,26 @@ fn find_sidecar_binary(app: &AppHandle) -> Option<PathBuf> {
                 .join("sber-whisper-sidecar")
                 .join(binary),
         );
+        candidates.push(
+            cwd.join("_up_")
+                .join("python")
+                .join("dist")
+                .join("sber-whisper-sidecar")
+                .join(binary),
+        );
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(
             resource_dir
+                .join("python")
+                .join("dist")
+                .join("sber-whisper-sidecar")
+                .join(binary),
+        );
+        candidates.push(
+            resource_dir
+                .join("_up_")
                 .join("python")
                 .join("dist")
                 .join("sber-whisper-sidecar")
@@ -331,11 +367,43 @@ fn find_sidecar_binary(app: &AppHandle) -> Option<PathBuf> {
                     .join("sber-whisper-sidecar")
                     .join(binary),
             );
+            candidates.push(
+                base.join("_up_")
+                    .join("python")
+                    .join("dist")
+                    .join("sber-whisper-sidecar")
+                    .join(binary),
+            );
             candidates.push(base.join("sber-whisper-sidecar").join(binary));
         }
     }
 
-    candidates.into_iter().find(|p| p.exists())
+    for path in candidates {
+        checked.push(path.clone());
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err(format!(
+        "bundled sidecar binary '{}' not found (checked {} paths)",
+        binary,
+        checked.len()
+    ))
+}
+
+fn allow_script_fallback() -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+
+    match std::env::var("SBER_WHISPER_ALLOW_SCRIPT_FALLBACK") {
+        Ok(raw) => {
+            let value = raw.trim();
+            value == "1" || value.eq_ignore_ascii_case("true")
+        }
+        Err(_) => false,
+    }
 }
 
 fn spawn_sidecar_command(
@@ -343,6 +411,13 @@ fn spawn_sidecar_command(
     mut cmd: Command,
     label: &str,
 ) -> Result<SidecarProcess, String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Sidecar is a console executable; prevent terminal window from flashing/opening.
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -396,21 +471,36 @@ fn start_sidecar_process(app: &AppHandle) -> Result<SidecarProcess, String> {
     let logs = logs_dir(app)?;
     let mut errors: Vec<String> = Vec::new();
 
-    if let Some(sidecar_bin) = find_sidecar_binary(app) {
-        let mut cmd = Command::new(&sidecar_bin);
-        cmd.env("SBER_WHISPER_LOG_DIR", logs.to_string_lossy().to_string())
-            .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONIOENCODING", "utf-8")
-            .env("PYTHONUTF8", "1");
+    match find_sidecar_binary(app) {
+        Ok(sidecar_bin) => {
+            let mut cmd = Command::new(&sidecar_bin);
+            cmd.env("SBER_WHISPER_LOG_DIR", logs.to_string_lossy().to_string())
+                .env("PYTHONUNBUFFERED", "1")
+                .env("PYTHONIOENCODING", "utf-8")
+                .env("PYTHONUTF8", "1");
 
-        match spawn_sidecar_command(app, cmd, &sidecar_bin.to_string_lossy()) {
-            Ok(proc) => return Ok(proc),
-            Err(e) => errors.push(e),
+            match spawn_sidecar_command(app, cmd, &sidecar_bin.to_string_lossy()) {
+                Ok(proc) => return Ok(proc),
+                Err(e) => errors.push(e),
+            }
         }
-    } else {
-        errors.push("bundled sidecar binary not found".to_string());
+        Err(e) => {
+            log_line(app, &e);
+            errors.push(e);
+        }
     }
 
+    if !allow_script_fallback() {
+        return Err(format!(
+            "failed to start bundled ASR sidecar; reinstall app. details: {}",
+            errors.join(" | ")
+        ));
+    }
+
+    log_line(
+        app,
+        "sidecar script fallback enabled; attempting to run python/asr_service.py",
+    );
     let script = find_python_script(app)?;
 
     let mut attempts: Vec<(String, Vec<String>)> = vec![
@@ -795,7 +885,7 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
     let menu = Menu::with_items(app, &[&settings_item, &quit_item])
         .map_err(|e| format!("failed to create tray menu: {e}"))?;
 
-    TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .icon(TRAY_ICON.clone())
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -810,6 +900,9 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
         })
         .build(app)
         .map_err(|e| format!("failed to create tray icon: {e}"))?;
+
+    // Tauri requires keeping TrayIcon handle alive; dropping it removes tray icon and may exit app.
+    std::mem::forget(tray);
 
     Ok(())
 }
@@ -829,7 +922,16 @@ fn setup_app(app: &AppHandle) -> Result<(), String> {
     let settings = load_settings_from_disk(app);
     save_settings_to_disk(app, &settings)?;
 
-    app.manage(SharedState::new(settings.clone()));
+    let shared = app.state::<SharedState>();
+    {
+        let mut guard = shared
+            .settings
+            .lock()
+            .map_err(|_| "failed to lock settings mutex".to_string())?;
+        *guard = settings.clone();
+    }
+    shared.recording_started.store(false, Ordering::SeqCst);
+    shared.shutdown.store(false, Ordering::SeqCst);
 
     setup_windows(app);
     build_tray(app)?;
@@ -867,6 +969,7 @@ fn cleanup_sidecar(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(SharedState::new(AppSettings::default()))
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(
             |app, _shortcut, event| match event.state {

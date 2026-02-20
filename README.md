@@ -57,6 +57,24 @@ make release-win
 make release-mac
 ```
 
+## Build On macOS
+Run these commands on a Mac host:
+
+```bash
+xcode-select --install
+brew install node python@3.11 rustup-init
+rustup-init -y
+```
+
+Then from the project directory:
+
+```bash
+make setup
+make release-mac
+```
+
+Resulting `.dmg` is copied to `dist/releases`.
+
 ## Runtime Behavior
 - App starts hidden in tray/top-bar.
 - Hold global hotkey to record; release to transcribe.
