@@ -1,0 +1,158 @@
+:root {
+  --bg-deep: #03111f;
+  --bg-soft: #0d2840;
+  --glow-a: #2bb8ff;
+  --glow-b: #0ff0cf;
+  --text-main: #ecf8ff;
+  --text-dim: #9cc3d8;
+  --error: #ff5f6d;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: "Segoe UI", "Avenir Next", sans-serif;
+  background: transparent;
+}
+
+.popup-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-main);
+}
+
+.nebula {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(43, 184, 255, 0.4) 0%, transparent 45%),
+    radial-gradient(circle at 80% 80%, rgba(15, 240, 207, 0.3) 0%, transparent 40%),
+    linear-gradient(135deg, var(--bg-deep), var(--bg-soft));
+  filter: blur(18px);
+}
+
+.card {
+  position: relative;
+  width: min(460px, 94vw);
+  min-height: 190px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(5, 20, 35, 0.72);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.4);
+  padding: 26px 24px 22px;
+}
+
+.close,
+.settings {
+  position: absolute;
+  top: 10px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.close {
+  right: 10px;
+}
+
+.settings {
+  right: 42px;
+  font-size: 16px;
+}
+
+.orb-wrap {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  margin: 0 auto 14px;
+}
+
+.orb {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 30%, #7be8ff, #1677aa 65%, #0c2c55 100%);
+  box-shadow:
+    0 0 22px rgba(43, 184, 255, 0.7),
+    inset 0 0 18px rgba(255, 255, 255, 0.28);
+  animation: float 2.6s ease-in-out infinite;
+}
+
+.pulse {
+  position: absolute;
+  inset: -6px;
+  border-radius: 999px;
+  border: 1px solid rgba(80, 205, 255, 0.5);
+  animation: pulse 1.4s ease-out infinite;
+}
+
+.detail {
+  margin: 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.text {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 17px;
+  line-height: 1.45;
+  min-height: 48px;
+  word-break: break-word;
+}
+
+.state-listening .pulse {
+  animation-duration: 1s;
+}
+
+.state-error .detail,
+.state-error .text {
+  color: var(--error);
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+
+  50% {
+    transform: translateY(-3px) scale(1.03);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(0.96);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1.24);
+    opacity: 0;
+  }
+}
+
+@media (max-width: 580px) {
+  .card {
+    width: min(96vw, 430px);
+    min-height: 170px;
+  }
+
+  .text {
+    font-size: 15px;
+  }
+}

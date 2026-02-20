@@ -1,0 +1,12 @@
+gigaam @ git+https://github.com/salute-developers/GigaAM.git@94082238aa5cabbd4bdc28e755100a1922a90d43
+hydra-core==1.3.*
+omegaconf==2.3.*
+numpy==2.*
+onnx==1.19.*
+onnxruntime==1.23.*
+sentencepiece
+torch==2.5.1
+torchaudio==2.5.1
+tqdm
+sounddevice>=0.4.6
+soundfile>=0.12.1
