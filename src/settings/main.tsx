@@ -59,6 +59,19 @@ function SettingsApp() {
           />
         </label>
 
+        <label>
+          <span>Model keepalive (min)</span>
+          <input
+            type="number"
+            min={1}
+            max={240}
+            value={settings.model_keepalive_min}
+            onChange={(e) =>
+              setSettings({ ...settings, model_keepalive_min: Number.parseInt(e.target.value, 10) || 5 })
+            }
+          />
+        </label>
+
         <label className="row-check">
           <input
             type="checkbox"

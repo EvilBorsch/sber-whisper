@@ -116,6 +116,7 @@ Resulting `.dmg` is copied to `artifacts/releases`.
 Settings window supports:
 - Hotkey
 - Popup auto-hide timeout
+- Model keepalive timeout (minutes before ASR model unloads from RAM/VRAM when idle)
 - Launch at login toggle
 
 Settings are stored in app config directory as `app_settings.json`.

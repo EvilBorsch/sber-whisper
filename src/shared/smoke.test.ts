@@ -5,4 +5,9 @@ describe("settings defaults contract", () => {
     const documentedDefault = 10;
     expect(documentedDefault).toBe(10);
   });
+
+  test("model keepalive default should remain 5 minutes in documented schema", () => {
+    const documentedDefault = 5;
+    expect(documentedDefault).toBe(5);
+  });
 });

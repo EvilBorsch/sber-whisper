@@ -26,6 +26,7 @@ const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("./icons/32x32.
 struct AppSettings {
     hotkey: String,
     popup_timeout_sec: u64,
+    model_keepalive_min: u64,
     auto_launch: bool,
     language_mode: String,
     theme: String,
@@ -41,6 +42,7 @@ impl Default for AppSettings {
         Self {
             hotkey: default_hotkey,
             popup_timeout_sec: 10,
+            model_keepalive_min: 5,
             auto_launch: false,
             language_mode: "ru".to_string(),
             theme: "siri_aurora".to_string(),
@@ -54,6 +56,7 @@ struct LegacySettings {
     hotkey_windows: Option<String>,
     hotkey_macos: Option<String>,
     popup_timeout_sec: Option<u64>,
+    model_keepalive_min: Option<u64>,
     auto_launch: Option<bool>,
     language_mode: Option<String>,
     theme: Option<String>,
@@ -68,6 +71,7 @@ struct SharedState {
     settings: Mutex<AppSettings>,
     sidecar: Mutex<Option<SidecarProcess>>,
     recording_started: AtomicBool,
+    suppress_disconnect_error: AtomicBool,
     shutdown: AtomicBool,
 }
 
@@ -77,6 +81,7 @@ impl SharedState {
             settings: Mutex::new(settings),
             sidecar: Mutex::new(None),
             recording_started: AtomicBool::new(false),
+            suppress_disconnect_error: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -151,6 +156,9 @@ fn load_settings_from_disk(app: &AppHandle) -> AppSettings {
 
         if let Some(timeout) = legacy.popup_timeout_sec {
             settings.popup_timeout_sec = timeout;
+        }
+        if let Some(keepalive_min) = legacy.model_keepalive_min {
+            settings.model_keepalive_min = keepalive_min;
         }
         if let Some(auto_launch) = legacy.auto_launch {
             settings.auto_launch = auto_launch;
@@ -579,6 +587,17 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
 
                     match serde_json::from_str::<Value>(&raw) {
                         Ok(payload) => {
+                            if payload.get("event")
+                                == Some(&Value::String("sidecar_idle_restart".to_string()))
+                            {
+                                let shared = app.state::<SharedState>();
+                                shared
+                                    .suppress_disconnect_error
+                                    .store(true, Ordering::SeqCst);
+                                log_line(&app, "sidecar requested idle restart");
+                                continue;
+                            }
+
                             if payload.get("event") == Some(&Value::String("final_transcript".to_string())) {
                                 if let Some(text) = payload.get("text").and_then(Value::as_str) {
                                     copy_text_to_clipboard(&app, text);
@@ -605,14 +624,20 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
 
         let shared = app.state::<SharedState>();
         shared.recording_started.store(false, Ordering::SeqCst);
+        let suppress_disconnect = shared
+            .suppress_disconnect_error
+            .swap(false, Ordering::SeqCst);
+        let shutting_down = shared.shutdown.load(Ordering::SeqCst);
 
-        emit_asr_event(
-            &app,
-            &json!({
-                "event": "error",
-                "message": "ASR sidecar disconnected. It will restart on next action."
-            }),
-        );
+        if !shutting_down && !suppress_disconnect {
+            emit_asr_event(
+                &app,
+                &json!({
+                    "event": "error",
+                    "message": "ASR sidecar disconnected. It will restart on next action."
+                }),
+            );
+        }
     });
 }
 
@@ -742,6 +767,20 @@ fn send_command_or_emit_error(app: &AppHandle, payload: Value) {
     }
 }
 
+fn send_config_to_sidecar(app: &AppHandle, settings: &AppSettings) {
+    send_command_or_emit_error(
+        app,
+        json!({
+            "command": "set_config",
+            "config": {
+                "language_mode": settings.language_mode.clone(),
+                "popup_timeout_sec": settings.popup_timeout_sec,
+                "model_keepalive_min": settings.model_keepalive_min
+            }
+        }),
+    );
+}
+
 fn handle_hotkey_press(app: &AppHandle) {
     let shared = app.state::<SharedState>();
 
@@ -783,6 +822,9 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<AppSettings, S
     if settings.popup_timeout_sec == 0 || settings.popup_timeout_sec > 120 {
         return Err("popup timeout must be between 1 and 120 seconds".to_string());
     }
+    if settings.model_keepalive_min == 0 || settings.model_keepalive_min > 240 {
+        return Err("model keepalive must be between 1 and 240 minutes".to_string());
+    }
 
     validate_hotkey(&settings)?;
 
@@ -799,16 +841,7 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<AppSettings, S
         *guard = settings.clone();
     }
 
-    send_command_or_emit_error(
-        &app,
-        json!({
-            "command": "set_config",
-            "config": {
-                "language_mode": settings.language_mode.clone(),
-                "popup_timeout_sec": settings.popup_timeout_sec
-            }
-        }),
-    );
+    send_config_to_sidecar(&app, &settings);
 
     log_line(&app, "settings updated");
     Ok(settings)
@@ -864,7 +897,7 @@ fn healthcheck(app: AppHandle) {
     send_command_or_emit_error(&app, json!({ "command": "healthcheck" }));
 }
 
-fn init_sidecar(app: &AppHandle) {
+fn init_sidecar(app: &AppHandle, settings: &AppSettings) {
     let shared = app.state::<SharedState>();
 
     if let Err(e) = ensure_sidecar_running(app, &shared) {
@@ -874,6 +907,7 @@ fn init_sidecar(app: &AppHandle) {
     }
 
     send_command_or_emit_error(app, json!({ "command": "init" }));
+    send_config_to_sidecar(app, settings);
 }
 
 fn build_tray(app: &AppHandle) -> Result<(), String> {
@@ -939,7 +973,7 @@ fn setup_app(app: &AppHandle) -> Result<(), String> {
     register_shortcut(app, current_hotkey(&settings))?;
     apply_autostart(app, settings.auto_launch)?;
 
-    init_sidecar(app);
+    init_sidecar(app, &settings);
     log_line(app, "application setup complete");
 
     Ok(())
@@ -1031,6 +1065,12 @@ mod tests {
     fn settings_default_timeout_is_ten() {
         let settings = AppSettings::default();
         assert_eq!(settings.popup_timeout_sec, 10);
+    }
+
+    #[test]
+    fn settings_default_keepalive_is_five_minutes() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.model_keepalive_min, 5);
     }
 
     #[test]

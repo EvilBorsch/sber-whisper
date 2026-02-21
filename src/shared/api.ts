@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface AppSettings {
   hotkey: string;
   popup_timeout_sec: number;
+  model_keepalive_min: number;
   auto_launch: boolean;
   language_mode: "ru";
   theme: "siri_aurora";

@@ -7,7 +7,6 @@ JSON lines IPC contract:
 """
 
 from __future__ import annotations
-
 import json
 import logging
 import logging.handlers
@@ -58,6 +57,7 @@ GIGAAM_GITHUB_REF = "https://github.com/salute-developers/GigaAM"
 class RuntimeConfig:
     language_mode: str = "ru"
     popup_timeout_sec: int = 10
+    model_keepalive_min: int = 5
 
 
 @dataclass
@@ -66,6 +66,8 @@ class AppState:
     model: Any | None = None
     model_device: str = "cpu"
     model_name_used: str = MODEL_NAME
+    model_last_used_at: float = 0.0
+    transcribing: bool = False
     model_lock: threading.Lock = field(default_factory=threading.Lock)
 
     audio_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -120,6 +122,7 @@ def choose_device() -> str:
 def load_model_if_needed() -> None:
     with STATE.model_lock:
         if STATE.model is not None:
+            STATE.model_last_used_at = time.monotonic()
             return
 
         if gigaam is None:
@@ -137,6 +140,7 @@ def load_model_if_needed() -> None:
             )
             STATE.model_device = preferred
             STATE.model_name_used = MODEL_NAME
+            STATE.model_last_used_at = time.monotonic()
             LOGGER.info("loaded model '%s' on %s", MODEL_NAME, preferred)
             return
         except ValueError as exc:
@@ -164,9 +168,50 @@ def load_model_if_needed() -> None:
             )
             STATE.model_device = "cpu"
             STATE.model_name_used = MODEL_NAME
+            STATE.model_last_used_at = time.monotonic()
             LOGGER.warning("loaded model '%s' with CPU fallback", MODEL_NAME)
         except Exception as exc:
             raise RuntimeError(f"Unable to load ASR model '{MODEL_NAME}': {exc}") from exc
+
+
+def touch_model_last_used() -> None:
+    with STATE.model_lock:
+        if STATE.model is not None:
+            STATE.model_last_used_at = time.monotonic()
+
+
+def set_transcribing(active: bool) -> None:
+    with STATE.model_lock:
+        STATE.transcribing = active
+        if active and STATE.model is not None:
+            STATE.model_last_used_at = time.monotonic()
+
+
+def unload_model_if_idle(now: float) -> None:
+    with STATE.model_lock:
+        keepalive_min = STATE.config.model_keepalive_min
+        keepalive_sec = max(1, keepalive_min) * 60
+
+        if STATE.model is None or STATE.transcribing or STATE.model_last_used_at <= 0:
+            return
+
+        idle_sec = now - STATE.model_last_used_at
+        if idle_sec < keepalive_sec:
+            return
+
+    LOGGER.info(
+        "idle timeout reached after %.1fs (keepalive=%s min), restarting sidecar for full memory release",
+        idle_sec,
+        keepalive_min,
+    )
+    emit("sidecar_idle_restart")
+    sys.stdout.flush()
+    os._exit(0)
+
+
+def model_idle_reaper() -> None:
+    while not STATE.shutdown_event.wait(timeout=5.0):
+        unload_model_if_idle(time.monotonic())
 
 
 def audio_callback(indata: np.ndarray, _frames: int, _time_info: Any, status: sd.CallbackFlags) -> None:
@@ -271,6 +316,7 @@ def send_streaming_partials(text: str, cancel_event: threading.Event) -> None:
 def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -> None:
     started_at = time.perf_counter()
     temp_path: Path | None = None
+    set_transcribing(True)
 
     try:
         audio = np.concatenate(frames, axis=0)
@@ -290,6 +336,7 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
             return
 
         load_model_if_needed()
+        touch_model_last_used()
 
         try:
             result = STATE.model.transcribe(str(temp_path))
@@ -305,9 +352,12 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
                         device="cpu",
                     )
                     STATE.model_device = "cpu"
+                    STATE.model_last_used_at = time.monotonic()
                 result = STATE.model.transcribe(str(temp_path))
             else:
                 raise
+
+        touch_model_last_used()
 
         if cancel_event.is_set():
             emit("job_cancelled")
@@ -338,6 +388,7 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
         emit("error", message=f"Transcription failed: {exc}")
         LOGGER.exception("transcription failed")
     finally:
+        set_transcribing(False)
         if temp_path is not None and temp_path.exists():
             try:
                 temp_path.unlink()
@@ -362,12 +413,16 @@ def cancel_current(silent: bool = False) -> None:
 def set_config(config: dict[str, Any]) -> None:
     lang = config.get("language_mode")
     timeout_sec = config.get("popup_timeout_sec")
+    keepalive_min = config.get("model_keepalive_min")
 
     if isinstance(lang, str) and lang:
         STATE.config.language_mode = lang
 
     if isinstance(timeout_sec, int) and timeout_sec > 0:
         STATE.config.popup_timeout_sec = timeout_sec
+
+    if isinstance(keepalive_min, int) and 1 <= keepalive_min <= 240:
+        STATE.config.model_keepalive_min = keepalive_min
 
 
 def healthcheck() -> None:
@@ -429,6 +484,7 @@ def run() -> int:
         torch.cuda.is_available(),
         torch.cuda.device_count(),
     )
+    threading.Thread(target=model_idle_reaper, daemon=True).start()
     LOGGER.info("ASR sidecar started")
 
     for line in sys.stdin:
