@@ -32,7 +32,7 @@ cd /d d:\sber-whisper
 taskkill /IM sber-whisper.exe /F >nul 2>nul
 taskkill /IM sber-whisper-sidecar.exe /F >nul 2>nul
 
-powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows
+powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant cpu
 if errorlevel 1 exit /b %errorlevel%
 
 npm run tauri build -- --bundles nsis

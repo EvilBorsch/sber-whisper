@@ -10,7 +10,7 @@ else
   GIGAAM_REF := gigaam @ git+https://github.com/salute-developers/GigaAM.git@94082238aa5cabbd4bdc28e755100a1922a90d43
 endif
 
-.PHONY: setup dev release release-win release-mac clean test
+.PHONY: setup dev release release-win release-win-gpu release-mac gpu-sidecar-win clean test
 
 setup:
 	npm install
@@ -29,6 +29,12 @@ endif
 
 release-win:
 	cmd /c scripts\\windows-tauri-build.cmd
+
+release-win-gpu:
+	cmd /c scripts\\windows-build-gpu-portable.cmd
+
+gpu-sidecar-win:
+	powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant gpu
 
 release-mac:
 	bash scripts/build-sidecar.sh

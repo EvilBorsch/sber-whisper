@@ -8,7 +8,7 @@ if [[ -z "${PLATFORM}" ]]; then
 fi
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_DIR="${REPO_DIR}/dist/releases"
+OUT_DIR="${REPO_DIR}/artifacts/releases"
 mkdir -p "${OUT_DIR}"
 
 if [[ "${PLATFORM}" == "windows" ]]; then

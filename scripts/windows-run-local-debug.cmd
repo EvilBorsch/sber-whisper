@@ -33,8 +33,9 @@ taskkill /IM sber-whisper-sidecar.exe /F >nul 2>nul
 if /i "%SKIP_SIDECAR_BUILD%"=="1" (
   echo SKIP_SIDECAR_BUILD=1, using existing sidecar build.
 ) else (
+  if "%SIDECAR_VARIANT%"=="" set SIDECAR_VARIANT=cpu
   echo Rebuilding sidecar for local debug...
-  powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows
+  powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant %SIDECAR_VARIANT%
   if errorlevel 1 exit /b %errorlevel%
 )
 

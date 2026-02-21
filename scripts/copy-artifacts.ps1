@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
-$outDir = Join-Path $repo "dist\releases"
+$outDir = Join-Path $repo "artifacts\releases"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 if ($Platform -eq "windows") {

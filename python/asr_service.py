@@ -422,6 +422,13 @@ def run() -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+    LOGGER.info(
+        "torch=%s torch_cuda=%s cuda_available=%s cuda_device_count=%s",
+        torch.__version__,
+        torch.version.cuda,
+        torch.cuda.is_available(),
+        torch.cuda.device_count(),
+    )
     LOGGER.info("ASR sidecar started")
 
     for line in sys.stdin:

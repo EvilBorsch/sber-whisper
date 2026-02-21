@@ -41,20 +41,50 @@ This builds a local debug exe with embedded frontend and runs:
 
 By default, this command rebuilds the sidecar every run, so dependency updates are applied.
 
+For local GPU debug sidecar build:
+
+```bash
+set SIDECAR_VARIANT=gpu && npm run run-local-win
+```
+
 ## Build Artifacts
 `make release` builds for the current host OS:
 - Windows host -> NSIS `.exe`
 - macOS host -> `.dmg`
 
-Output artifacts are copied to `dist/releases`.
+Output artifacts are copied to `artifacts/releases`.
 
 The release build first creates a standalone ASR sidecar binary (`sber-whisper-sidecar`) and
 embeds it into the installer resources, so you can share just the installer file.
+
+Windows installer is CPU-first by default, so resulting `setup.exe` stays smaller and stable for sharing.
 
 Manual targets:
 ```bash
 make release-win
 make release-mac
+```
+
+## Optional Windows GPU Build
+GPU variant is separate from installer build.
+
+Build GPU portable package (no installer):
+```bash
+make release-win-gpu
+```
+
+Result:
+- folder: `artifacts/releases/sber-whisper-gpu-portable-win-x64`
+- zip: `artifacts/releases/sber-whisper-gpu-portable-win-x64.zip`
+
+Run GPU portable build:
+1. Unzip package.
+2. Keep `sber-whisper.exe` and `sber-whisper-sidecar/` in the same folder.
+3. Start `sber-whisper.exe`.
+
+Build only GPU sidecar (without packaging):
+```bash
+make gpu-sidecar-win
 ```
 
 ## Build On macOS
@@ -73,7 +103,7 @@ make setup
 make release-mac
 ```
 
-Resulting `.dmg` is copied to `dist/releases`.
+Resulting `.dmg` is copied to `artifacts/releases`.
 
 ## Runtime Behavior
 - App starts hidden in tray/top-bar.
@@ -129,3 +159,15 @@ Rebuild sidecar and rerun debug/release build:
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows
 ```
+
+If you want forced GPU sidecar build:
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant gpu
+```
+
+## License
+This project is licensed under the MIT License. See `LICENSE`.
+
+Third-party notice:
+- GigaAM is MIT-licensed: https://github.com/salute-developers/GigaAM/blob/main/LICENSE
