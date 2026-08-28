@@ -13,7 +13,6 @@ $distRoot = Join-Path $repo "python\dist"
 $distDir = Join-Path $distRoot "sber-whisper-sidecar"
 $buildDir = Join-Path $repo "python\build"
 $scriptPath = Join-Path $repo "python\asr_service.py"
-$gigaamRef = "gigaam @ git+https://github.com/salute-developers/GigaAM.git@94082238aa5cabbd4bdc28e755100a1922a90d43"
 $torchIndex = "https://download.pytorch.org/whl/cu128"
 
 if (!(Test-Path $scriptPath)) {
@@ -34,7 +33,6 @@ if (!(Test-Path $py)) {
 if ($Variant -eq "gpu") {
   & $py -m pip install --upgrade --force-reinstall --index-url $torchIndex torch==2.8.0+cu128 torchaudio==2.8.0+cu128
 }
-& $py -m pip install --force-reinstall --no-deps --no-cache-dir $gigaamRef
 
 Get-Process sber-whisper-sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
 
