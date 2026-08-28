@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use arboard::Clipboard;
 use chrono::Local;
+use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem};
@@ -190,10 +191,13 @@ fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
             .map_err(|e| format!("failed to enable auto-launch: {e}"))?;
     } else {
         if let Err(e) = app.autolaunch().disable() {
-            // Some platforms/plugins return "not found" when auto-launch is already absent.
+            // Некоторые платформы возвращают "not found", если автозапуск уже отключён.
             let msg = e.to_string();
             if msg.contains("os error 2") {
-                log_line(app, &format!("auto-launch entry already absent, continuing: {msg}"));
+                log_line(
+                    app,
+                    &format!("auto-launch entry already absent, continuing: {msg}"),
+                );
             } else {
                 return Err(format!("failed to disable auto-launch: {e}"));
             }
@@ -221,19 +225,68 @@ fn register_shortcut(app: &AppHandle, hotkey: &str) -> Result<(), String> {
 }
 
 fn emit_asr_event(app: &AppHandle, payload: &Value) {
+    // Ошибку показываем всегда: пилюля может быть уже скрыта после предыдущей диктовки.
+    if payload.get("event") == Some(&Value::String("error".to_string())) {
+        show_popup(app);
+    }
     let _ = app.emit("asr_event", payload.clone());
 }
 
-fn copy_text_to_clipboard(app: &AppHandle, text: &str) {
-    match Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string())) {
-        Ok(_) => log_line(app, "copied transcript to clipboard"),
+fn send_paste_keystroke() -> Result<(), String> {
+    // Raw-коды клавиши V не зависят от раскладки клавиатуры (Cmd+V работает и на русской).
+    #[cfg(target_os = "macos")]
+    const V_KEY: Key = Key::Other(9); // kVK_ANSI_V
+    #[cfg(not(target_os = "macos"))]
+    const V_KEY: Key = Key::Other(0x56); // VK_V
+    #[cfg(target_os = "macos")]
+    const MODIFIER: Key = Key::Meta;
+    #[cfg(not(target_os = "macos"))]
+    const MODIFIER: Key = Key::Control;
+
+    let mut enigo =
+        Enigo::new(&EnigoSettings::default()).map_err(|e| format!("enigo init failed: {e}"))?;
+    enigo
+        .key(MODIFIER, Direction::Press)
+        .map_err(|e| format!("modifier press failed: {e}"))?;
+    let result = enigo
+        .key(V_KEY, Direction::Click)
+        .map_err(|e| format!("V key press failed: {e}"));
+    let release = enigo
+        .key(MODIFIER, Direction::Release)
+        .map_err(|e| format!("modifier release failed: {e}"));
+    result.and(release)
+}
+
+// Кладёт текст в буфер обмена и вставляет его в фокусное приложение через Cmd+V/Ctrl+V.
+// Буфер намеренно не восстанавливается: текст в нём остаётся резервной копией диктовки.
+fn insert_transcript(app: &AppHandle, text: &str) {
+    if let Err(e) = Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string())) {
+        log_line(app, &format!("clipboard copy failed: {e}"));
+        emit_asr_event(
+            app,
+            &json!({
+                "event": "error",
+                "message": format!("Clipboard copy failed: {e}")
+            }),
+        );
+        return;
+    }
+
+    // Пауза даёт целевому приложению увидеть обновлённый буфер обмена до вставки.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    match send_paste_keystroke() {
+        Ok(_) => {
+            log_line(app, "transcript inserted at cursor");
+            emit_asr_event(app, &json!({ "event": "text_inserted" }));
+        }
         Err(e) => {
-            log_line(app, &format!("clipboard copy failed: {e}"));
+            log_line(app, &format!("paste keystroke failed: {e}"));
             emit_asr_event(
                 app,
                 &json!({
                     "event": "error",
-                    "message": format!("Clipboard copy failed: {e}")
+                    "message": "Text copied to clipboard. Allow Accessibility access to enable auto-insert."
                 }),
             );
         }
@@ -246,15 +299,26 @@ fn find_python_script(app: &AppHandle) -> Result<PathBuf, String> {
         PathBuf::from("python").join("asr_service.py"),
         PathBuf::from("_up_").join("python").join("asr_service.py"),
         PathBuf::from("..").join("python").join("asr_service.py"),
-        PathBuf::from("..").join("_up_").join("python").join("asr_service.py"),
-        PathBuf::from("..").join("..").join("python").join("asr_service.py"),
+        PathBuf::from("..")
+            .join("_up_")
+            .join("python")
+            .join("asr_service.py"),
+        PathBuf::from("..")
+            .join("..")
+            .join("python")
+            .join("asr_service.py"),
     ];
 
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("python").join("asr_service.py"));
         candidates.push(cwd.join("_up_").join("python").join("asr_service.py"));
         candidates.push(cwd.join("..").join("python").join("asr_service.py"));
-        candidates.push(cwd.join("..").join("_up_").join("python").join("asr_service.py"));
+        candidates.push(
+            cwd.join("..")
+                .join("_up_")
+                .join("python")
+                .join("asr_service.py"),
+        );
     }
 
     if let Ok(exe_path) = std::env::current_exe() {
@@ -262,13 +326,23 @@ fn find_python_script(app: &AppHandle) -> Result<PathBuf, String> {
             candidates.push(base.join("python").join("asr_service.py"));
             candidates.push(base.join("_up_").join("python").join("asr_service.py"));
             candidates.push(base.join("..").join("python").join("asr_service.py"));
-            candidates.push(base.join("..").join("_up_").join("python").join("asr_service.py"));
+            candidates.push(
+                base.join("..")
+                    .join("_up_")
+                    .join("python")
+                    .join("asr_service.py"),
+            );
         }
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("python").join("asr_service.py"));
-        candidates.push(resource_dir.join("_up_").join("python").join("asr_service.py"));
+        candidates.push(
+            resource_dir
+                .join("_up_")
+                .join("python")
+                .join("asr_service.py"),
+        );
         candidates.push(resource_dir.join("asr_service.py"));
     }
 
@@ -421,7 +495,7 @@ fn spawn_sidecar_command(
 ) -> Result<SidecarProcess, String> {
     #[cfg(target_os = "windows")]
     {
-        // Sidecar is a console executable; prevent terminal window from flashing/opening.
+        // Запрещаем консольному процессу открывать окно терминала.
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
@@ -511,7 +585,7 @@ fn start_sidecar_process(app: &AppHandle) -> Result<SidecarProcess, String> {
     );
     let script = find_python_script(app)?;
 
-    let mut attempts: Vec<(String, Vec<String>)> = vec![
+    let attempts: Vec<(String, Vec<String>)> = vec![
         (
             "python".to_string(),
             vec![script.to_string_lossy().to_string()],
@@ -523,12 +597,14 @@ fn start_sidecar_process(app: &AppHandle) -> Result<SidecarProcess, String> {
     ];
 
     #[cfg(target_os = "windows")]
-    {
+    let attempts = {
+        let mut attempts = attempts;
         attempts.push((
             "py".to_string(),
             vec!["-3".to_string(), script.to_string_lossy().to_string()],
         ));
-    }
+        attempts
+    };
 
     let mut last_err = String::new();
 
@@ -580,7 +656,10 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
                     let raw = match String::from_utf8(buffer.clone()) {
                         Ok(text) => text,
                         Err(_) => {
-                            log_line(&app, "sidecar stdout contained non-UTF8 bytes; decoding lossy");
+                            log_line(
+                                &app,
+                                "sidecar stdout contained non-UTF8 bytes; decoding lossy",
+                            );
                             String::from_utf8_lossy(&buffer).into_owned()
                         }
                     };
@@ -598,17 +677,21 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
                                 continue;
                             }
 
-                            if payload.get("event") == Some(&Value::String("final_transcript".to_string())) {
-                                if let Some(text) = payload.get("text").and_then(Value::as_str) {
-                                    copy_text_to_clipboard(&app, text);
-                                }
-                            }
-
                             if payload.get("event") == Some(&Value::String("ready".to_string())) {
                                 log_line(&app, "sidecar ready event received");
                             }
 
                             emit_asr_event(&app, &payload);
+
+                            if payload.get("event")
+                                == Some(&Value::String("final_transcript".to_string()))
+                            {
+                                if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                                    if !text.is_empty() {
+                                        insert_transcript(&app, text);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             log_line(&app, &format!("invalid sidecar JSON '{raw}': {e}"));
@@ -644,11 +727,9 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
 fn spawn_stderr_reader(app: AppHandle, stderr: ChildStderr) {
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(raw) = line {
-                if !raw.trim().is_empty() {
-                    log_line(&app, &format!("sidecar stderr: {raw}"));
-                }
+        for raw in reader.lines().map_while(Result::ok) {
+            if !raw.trim().is_empty() {
+                log_line(&app, &format!("sidecar stderr: {raw}"));
             }
         }
     });
@@ -717,6 +798,7 @@ fn settings_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R>, S
         .ok_or_else(|| "settings window not found".to_string())
 }
 
+// Ставит пилюлю по центру внизу рабочей области (над Dock / панелью задач).
 fn position_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let popup = popup_window(app)?;
     let monitor = popup
@@ -724,14 +806,17 @@ fn position_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .map_err(|e| format!("failed to read monitor: {e}"))?
         .ok_or_else(|| "no monitor found".to_string())?;
 
-    let monitor_size = monitor.size();
     let scale = monitor.scale_factor();
+    let work_area = monitor.work_area();
     let popup_size = popup
         .outer_size()
         .map_err(|e| format!("failed to read popup size: {e}"))?;
 
-    let x = monitor_size.width as f64 - popup_size.width as f64 - 20.0;
-    let y = 20.0;
+    let x = work_area.position.x as f64
+        + (work_area.size.width as f64 - popup_size.width as f64) / 2.0;
+    let y = work_area.position.y as f64 + work_area.size.height as f64
+        - popup_size.height as f64
+        - 12.0 * scale;
 
     popup
         .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
@@ -749,14 +834,16 @@ fn show_popup(app: &AppHandle) {
             log_line(app, &format!("popup positioning error: {e}"));
         }
 
+        // Окно показывается без фокуса, чтобы вставка ушла в приложение с курсором.
         let _ = popup.show();
-        let _ = popup.set_focus();
     }
 }
 
 fn hide_popup_inner(app: &AppHandle) -> Result<(), String> {
     let popup = popup_window(app)?;
-    popup.hide().map_err(|e| format!("failed to hide popup: {e}"))?;
+    popup
+        .hide()
+        .map_err(|e| format!("failed to hide popup: {e}"))?;
     Ok(())
 }
 
@@ -781,7 +868,8 @@ fn send_config_to_sidecar(app: &AppHandle, settings: &AppSettings) {
     );
 }
 
-fn handle_hotkey_press(app: &AppHandle) {
+// Хоткей-переключатель: первое нажатие начинает запись, второе останавливает и вставляет текст.
+fn handle_hotkey_toggle(app: &AppHandle) {
     let shared = app.state::<SharedState>();
 
     if shared
@@ -790,19 +878,10 @@ fn handle_hotkey_press(app: &AppHandle) {
         .is_ok()
     {
         show_popup(app);
+        emit_asr_event(app, &json!({ "event": "dictation_starting" }));
         send_command_or_emit_error(app, json!({ "command": "start_recording" }));
-    }
-}
-
-fn handle_hotkey_release(app: &AppHandle) {
-    let shared = app.state::<SharedState>();
-
-    if shared
-        .recording_started
-        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        show_popup(app);
+    } else {
+        shared.recording_started.store(false, Ordering::SeqCst);
         send_command_or_emit_error(app, json!({ "command": "stop_and_transcribe" }));
     }
 }
@@ -870,31 +949,10 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn start_recording(app: AppHandle) {
-    let shared = app.state::<SharedState>();
-    shared.recording_started.store(true, Ordering::SeqCst);
-    show_popup(&app);
-    send_command_or_emit_error(&app, json!({ "command": "start_recording" }));
-}
-
-#[tauri::command]
-fn stop_and_transcribe(app: AppHandle) {
-    let shared = app.state::<SharedState>();
-    shared.recording_started.store(false, Ordering::SeqCst);
-    show_popup(&app);
-    send_command_or_emit_error(&app, json!({ "command": "stop_and_transcribe" }));
-}
-
-#[tauri::command]
 fn cancel_current(app: AppHandle) {
     let shared = app.state::<SharedState>();
     shared.recording_started.store(false, Ordering::SeqCst);
     send_command_or_emit_error(&app, json!({ "command": "cancel_current" }));
-}
-
-#[tauri::command]
-fn healthcheck(app: AppHandle) {
-    send_command_or_emit_error(&app, json!({ "command": "healthcheck" }));
 }
 
 fn init_sidecar(app: &AppHandle, settings: &AppSettings) {
@@ -935,7 +993,7 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
         .build(app)
         .map_err(|e| format!("failed to create tray icon: {e}"))?;
 
-    // Tauri requires keeping TrayIcon handle alive; dropping it removes tray icon and may exit app.
+    // Tauri удаляет значок и может завершить приложение при освобождении дескриптора.
     std::mem::forget(tray);
 
     Ok(())
@@ -953,6 +1011,10 @@ fn setup_windows(app: &AppHandle) {
 }
 
 fn setup_app(app: &AppHandle) -> Result<(), String> {
+    // Accessory-режим: приложение живёт в трее, не показывается в Dock и не перехватывает фокус.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
     let settings = load_settings_from_disk(app);
     save_settings_to_disk(app, &settings)?;
 
@@ -1005,20 +1067,23 @@ pub fn run() {
     tauri::Builder::default()
         .manage(SharedState::new(AppSettings::default()))
         .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(
-            |app, _shortcut, event| match event.state {
-                ShortcutState::Pressed => handle_hotkey_press(app),
-                ShortcutState::Released => handle_hotkey_release(app),
-            },
-        ).build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        handle_hotkey_toggle(app);
+                    }
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--silent"]),
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            setup_app(&app.handle()).map_err(|e| -> Box<dyn std::error::Error> {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
+            setup_app(app.handle()).map_err(|e| -> Box<dyn std::error::Error> {
+                Box::new(std::io::Error::other(e))
             })?;
             Ok(())
         })
@@ -1028,10 +1093,7 @@ pub fn run() {
             hide_popup,
             open_settings_window,
             hide_settings_window,
-            start_recording,
-            stop_and_transcribe,
             cancel_current,
-            healthcheck,
         ])
         .on_window_event(|window, event| {
             if window.label() == "popup" {

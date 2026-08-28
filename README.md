@@ -2,11 +2,15 @@
 
 Cross-platform desktop voice-to-text app (Windows + macOS) with:
 - Tray/top-bar background mode
-- Global hold-to-talk hotkey (`Ctrl+G` on Windows, `Cmd+G` on macOS)
-- Siri-style popup with streaming partials and final transcription
-- Automatic clipboard copy on final result
+- Global toggle hotkey (`Ctrl+G` on Windows, `Cmd+G` on macOS): press to start dictation, press again to stop
+- Final text is inserted at the cursor of the focused app (and kept in the clipboard as backup)
+- Compact Wispr Flow-style pill at the bottom of the screen with a live microphone waveform
 - Local-only processing with GigaAM `v3_e2e_rnnt`
 - Bundled Python sidecar in installer (target machine does not need Python)
+
+On macOS the app needs two permissions: Microphone and Accessibility (for inserting text
+via synthetic `Cmd+V`). The Accessibility prompt appears on the first insertion; until it
+is granted, text is only copied to the clipboard.
 
 ## Stack
 - Desktop shell: Tauri v2 + React + TypeScript
@@ -107,15 +111,15 @@ Resulting `.dmg` is copied to `artifacts/releases`.
 
 ## Runtime Behavior
 - App starts hidden in tray/top-bar.
-- Hold global hotkey to record; release to transcribe.
-- If retriggered while busy: current job is cancelled, new one starts.
-- Popup closes by timeout, close click, or any keypress while focused.
+- Press global hotkey to start recording; press again to stop, transcribe and insert text at the cursor.
+- The pill popup never takes keyboard focus, so the target app keeps the cursor.
+- Pill hides itself after insertion; errors hide by `popup_timeout_sec` or close click.
 - Audio is written to temp file only during job and immediately deleted after transcription.
 
 ## Settings
 Settings window supports:
 - Hotkey
-- Popup auto-hide timeout
+- Popup auto-hide timeout (applies to error messages; success hides automatically)
 - Model keepalive timeout (minutes before ASR model unloads from RAM/VRAM when idle)
 - Launch at login toggle
 
@@ -141,12 +145,15 @@ Python sidecar command IPC (stdin JSON lines):
 Python sidecar event IPC (stdout JSON lines):
 - `ready`
 - `recording_started`
+- `audio_level`
 - `recording_stopped`
-- `partial_transcript`
 - `final_transcript`
 - `job_cancelled`
 - `error`
 - `metrics`
+
+The Rust shell additionally emits `dictation_starting` (right on hotkey press, before the
+sidecar answers) and `text_inserted` (after a successful paste) to the popup.
 
 ## Tests
 ```bash

@@ -1,6 +1,6 @@
 [package]
 name = "sber-whisper"
-version = "0.1.5"
+version = "0.2.1"
 description = "Sber Whisper desktop voice-to-text app"
 authors = ["pingv"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
@@ -22,3 +22,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arboard = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+enigo = "0.6"

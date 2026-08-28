@@ -34,6 +34,11 @@ class SidecarTests(unittest.TestCase):
         asr_service.handle_command({"command": "unknown"})
         self.assertTrue(any(e["event"] == "error" for e in self.events))
 
+    def test_rms_to_level_normalization(self) -> None:
+        self.assertEqual(asr_service.rms_to_level(0.0), 0.0)
+        self.assertAlmostEqual(asr_service.rms_to_level(0.01), 0.3, places=3)
+        self.assertEqual(asr_service.rms_to_level(0.5), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

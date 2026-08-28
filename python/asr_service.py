@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Sber Whisper ASR sidecar.
+"""Сервис распознавания речи Sber Whisper.
 
-JSON lines IPC contract:
-- Input commands via stdin
-- Output events via stdout
+Протокол IPC в формате JSON Lines:
+- команды поступают через stdin;
+- события отправляются через stdout.
 """
 
 from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import math
 import os
 import sys
 import tempfile
@@ -22,7 +23,7 @@ from typing import Any
 import numpy as np
 try:
     import sounddevice as sd
-except Exception as exc:  # pragma: no cover - reported at runtime
+except Exception as exc:  # pragma: no cover — ошибка сообщается во время выполнения
     sd = None
     SOUNDDEVICE_IMPORT_ERROR = exc
 else:
@@ -30,16 +31,19 @@ else:
 
 try:
     import soundfile as sf
-except Exception as exc:  # pragma: no cover - reported at runtime
+except Exception as exc:  # pragma: no cover — ошибка сообщается во время выполнения
     sf = None
     SOUNDFILE_IMPORT_ERROR = exc
 else:
     SOUNDFILE_IMPORT_ERROR = None
 import torch
 
+if sys.platform == "darwin":
+    os.environ["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
+
 try:
     import gigaam
-except Exception as exc:  # pragma: no cover - reported at runtime
+except Exception as exc:  # pragma: no cover — ошибка сообщается во время выполнения
     gigaam = None
     GIGAAM_IMPORT_ERROR = exc
 else:
@@ -50,6 +54,7 @@ CHANNELS = 1
 MODEL_NAME = "v3_e2e_rnnt"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 MIN_RECORDING_SEC = 0.35
+LEVEL_EMIT_INTERVAL_SEC = 0.066
 GIGAAM_GITHUB_REF = "https://github.com/salute-developers/GigaAM"
 
 
@@ -75,6 +80,7 @@ class AppState:
     frames: list[np.ndarray] = field(default_factory=list)
     recording: bool = False
     recording_started_at: float = 0.0
+    level: float = 0.0
 
     transcribe_thread: threading.Thread | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -106,10 +112,10 @@ STATE = AppState()
 def emit(event: str, **payload: Any) -> None:
     data = {"event": event, **payload}
     try:
-        # Keep IPC payload ASCII-safe to avoid locale-specific stdout encodings on Windows pipes.
+        # ASCII-совместимый JSON не зависит от кодировки stdout в каналах Windows.
         sys.stdout.write(json.dumps(data, ensure_ascii=True) + "\n")
         sys.stdout.flush()
-    except Exception as exc:  # pragma: no cover - io failure
+    except Exception as exc:  # pragma: no cover — ошибка ввода-вывода
         LOGGER.error("failed to emit event: %s", exc)
 
 
@@ -214,6 +220,11 @@ def model_idle_reaper() -> None:
         unload_model_if_idle(time.monotonic())
 
 
+def rms_to_level(rms: float) -> float:
+    # Корень сглаживает динамику: тихая речь заметна, громкая не упирается в потолок.
+    return round(min(1.0, math.sqrt(max(0.0, rms)) * 3.0), 3)
+
+
 def audio_callback(indata: np.ndarray, _frames: int, _time_info: Any, status: sd.CallbackFlags) -> None:
     if status:
         LOGGER.warning("audio callback status: %s", status)
@@ -222,6 +233,15 @@ def audio_callback(indata: np.ndarray, _frames: int, _time_info: Any, status: sd
         if not STATE.recording:
             return
         STATE.frames.append(indata.copy())
+        STATE.level = rms_to_level(float(np.sqrt(np.mean(np.square(indata)))))
+
+
+def level_emitter() -> None:
+    while STATE.recording:
+        with STATE.audio_lock:
+            level = STATE.level
+        emit("audio_level", level=level)
+        time.sleep(LEVEL_EMIT_INTERVAL_SEC)
 
 
 def start_recording() -> None:
@@ -238,6 +258,7 @@ def start_recording() -> None:
         STATE.frames = []
         STATE.recording = True
         STATE.recording_started_at = time.monotonic()
+        STATE.level = 0.0
 
     try:
         stream = sd.InputStream(
@@ -250,6 +271,7 @@ def start_recording() -> None:
         stream.start()
         STATE.stream = stream
         emit("recording_started")
+        threading.Thread(target=level_emitter, daemon=True).start()
         LOGGER.info("recording started")
     except Exception as exc:
         with STATE.audio_lock:
@@ -289,7 +311,7 @@ def stop_and_transcribe() -> None:
     emit("recording_stopped")
 
     if not frames:
-        emit("error", message="No audio captured. Check microphone permission or hold hotkey longer.")
+        emit("error", message="No audio captured. Check microphone permission.")
         return
 
     STATE.cancel_event = threading.Event()
@@ -297,20 +319,6 @@ def stop_and_transcribe() -> None:
     thread = threading.Thread(target=transcribe_worker, args=(frames, STATE.cancel_event), daemon=True)
     STATE.transcribe_thread = thread
     thread.start()
-
-
-def send_streaming_partials(text: str, cancel_event: threading.Event) -> None:
-    words = text.split()
-    if not words:
-        return
-
-    partial = []
-    for word in words:
-        if cancel_event.is_set():
-            return
-        partial.append(word)
-        emit("partial_transcript", text=" ".join(partial))
-        time.sleep(0.03)
 
 
 def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -> None:
@@ -363,16 +371,7 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
             emit("job_cancelled")
             return
 
-        if isinstance(result, dict):
-            text = str(result.get("transcription", "")).strip()
-        else:
-            text = str(result).strip()
-
-        send_streaming_partials(text, cancel_event)
-
-        if cancel_event.is_set():
-            emit("job_cancelled")
-            return
+        text = result.text.strip()
 
         emit("final_transcript", text=text)
 
