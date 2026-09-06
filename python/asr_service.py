@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+import gc
 import json
 import logging
 import logging.handlers
@@ -54,6 +55,10 @@ CHANNELS = 1
 MODEL_NAME = "v3_e2e_rnnt"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 MIN_RECORDING_SEC = 0.35
+# Модель принимает не больше 25 с, поэтому длинные записи режем на куски с запасом.
+CHUNK_MAX_SEC = 20.0
+CHUNK_CUT_SEARCH_SEC = 8.0
+CHUNK_CUT_FRAME_SEC = 0.02
 LEVEL_EMIT_INTERVAL_SEC = 0.066
 GIGAAM_GITHUB_REF = "https://github.com/salute-developers/GigaAM"
 
@@ -136,6 +141,7 @@ def load_model_if_needed() -> None:
 
         preferred = choose_device()
         LOGGER.info("loading model '%s' on %s", MODEL_NAME, preferred)
+        started_at = time.perf_counter()
 
         try:
             STATE.model = gigaam.load_model(
@@ -147,7 +153,8 @@ def load_model_if_needed() -> None:
             STATE.model_device = preferred
             STATE.model_name_used = MODEL_NAME
             STATE.model_last_used_at = time.monotonic()
-            LOGGER.info("loaded model '%s' on %s", MODEL_NAME, preferred)
+            LOGGER.info("loaded model '%s' on %s in %.1fs", MODEL_NAME, preferred, time.perf_counter() - started_at)
+            emit("model_loaded", device=preferred)
             return
         except ValueError as exc:
             message = str(exc)
@@ -176,8 +183,25 @@ def load_model_if_needed() -> None:
             STATE.model_name_used = MODEL_NAME
             STATE.model_last_used_at = time.monotonic()
             LOGGER.warning("loaded model '%s' with CPU fallback", MODEL_NAME)
+            emit("model_loaded", device="cpu")
         except Exception as exc:
             raise RuntimeError(f"Unable to load ASR model '{MODEL_NAME}': {exc}") from exc
+
+
+def preload_model_in_background() -> None:
+    """Греет модель, не блокируя запись: ошибку покажет распознавание, когда модель понадобится."""
+    if STATE.model is not None:
+        return
+
+    emit("model_loading")
+
+    def worker() -> None:
+        try:
+            load_model_if_needed()
+        except Exception:
+            LOGGER.exception("background model load failed")
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def touch_model_last_used() -> None:
@@ -205,14 +229,15 @@ def unload_model_if_idle(now: float) -> None:
         if idle_sec < keepalive_sec:
             return
 
-    LOGGER.info(
-        "idle timeout reached after %.1fs (keepalive=%s min), restarting sidecar for full memory release",
-        idle_sec,
-        keepalive_min,
-    )
-    emit("sidecar_idle_restart")
-    sys.stdout.flush()
-    os._exit(0)
+        # Процесс с импортированным torch остаётся жить: его холодный старт занимает
+        # секунды и терял начало диктовки, а сама модель перегружается быстро.
+        STATE.model = None
+        STATE.model_last_used_at = 0.0
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    LOGGER.info("idle timeout reached after %.1fs (keepalive=%s min), model unloaded", idle_sec, keepalive_min)
 
 
 def model_idle_reaper() -> None:
@@ -270,6 +295,7 @@ def start_recording() -> None:
         )
         stream.start()
         STATE.stream = stream
+        preload_model_in_background()
         emit("recording_started")
         threading.Thread(target=level_emitter, daemon=True).start()
         LOGGER.info("recording started")
@@ -321,9 +347,60 @@ def stop_and_transcribe() -> None:
     thread.start()
 
 
+def split_audio(audio: np.ndarray, sample_rate: int) -> list[np.ndarray]:
+    """Режет запись на куски не длиннее CHUNK_MAX_SEC.
+
+    Разрез ставится в самом тихом 20-мс кадре последних CHUNK_CUT_SEARCH_SEC секунд окна,
+    чтобы не резать слово посередине.
+    """
+    max_len = int(CHUNK_MAX_SEC * sample_rate)
+    search_len = int(CHUNK_CUT_SEARCH_SEC * sample_rate)
+    frame_len = int(CHUNK_CUT_FRAME_SEC * sample_rate)
+
+    chunks: list[np.ndarray] = []
+    start = 0
+    while len(audio) - start > max_len:
+        search_start = start + max_len - search_len
+        frames = audio[search_start : start + max_len].reshape(-1, frame_len)
+        quietest = int(np.argmin(np.mean(np.square(frames), axis=1)))
+        cut = search_start + quietest * frame_len + frame_len // 2
+        chunks.append(audio[start:cut])
+        start = cut
+
+    # Хвост короче минимальной записи модель не распознает — приклеиваем к предыдущему куску.
+    tail = audio[start:]
+    if chunks and len(tail) < MIN_RECORDING_SEC * sample_rate:
+        chunks[-1] = np.concatenate([chunks[-1], tail])
+    else:
+        chunks.append(tail)
+    return chunks
+
+
+def transcribe_audio(audio: np.ndarray, cancel_event: threading.Event) -> str | None:
+    """Распознаёт запись любой длины по кускам; None — если задачу отменили."""
+    texts: list[str] = []
+    for chunk in split_audio(audio, SAMPLE_RATE):
+        if cancel_event.is_set():
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        try:
+            sf.write(temp_path, chunk, SAMPLE_RATE)
+            text = STATE.model.transcribe(str(temp_path)).text.strip()
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        if text:
+            texts.append(text)
+
+    if cancel_event.is_set():
+        return None
+    return " ".join(texts)
+
+
 def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -> None:
     started_at = time.perf_counter()
-    temp_path: Path | None = None
     set_transcribing(True)
 
     try:
@@ -334,44 +411,31 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
         if sf is None:
             raise RuntimeError(f"Audio file dependency missing: {SOUNDFILE_IMPORT_ERROR}")
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            temp_path = Path(tmp.name)
-
-        sf.write(temp_path, audio, SAMPLE_RATE)
-
-        if cancel_event.is_set():
-            emit("job_cancelled")
-            return
-
         load_model_if_needed()
         touch_model_last_used()
 
         try:
-            result = STATE.model.transcribe(str(temp_path))
+            text = transcribe_audio(audio, cancel_event)
         except RuntimeError as exc:
-            text = str(exc).lower()
-            if "cuda" in text and STATE.model_device == "cuda":
-                LOGGER.warning("cuda runtime failed, fallback to cpu once: %s", exc)
-                with STATE.model_lock:
-                    STATE.model = gigaam.load_model(
-                        MODEL_NAME,
-                        fp16_encoder=False,
-                        use_flash=False,
-                        device="cpu",
-                    )
-                    STATE.model_device = "cpu"
-                    STATE.model_last_used_at = time.monotonic()
-                result = STATE.model.transcribe(str(temp_path))
-            else:
+            if "cuda" not in str(exc).lower() or STATE.model_device != "cuda":
                 raise
+            LOGGER.warning("cuda runtime failed, fallback to cpu once: %s", exc)
+            with STATE.model_lock:
+                STATE.model = gigaam.load_model(
+                    MODEL_NAME,
+                    fp16_encoder=False,
+                    use_flash=False,
+                    device="cpu",
+                )
+                STATE.model_device = "cpu"
+                STATE.model_last_used_at = time.monotonic()
+            text = transcribe_audio(audio, cancel_event)
 
         touch_model_last_used()
 
-        if cancel_event.is_set():
+        if text is None:
             emit("job_cancelled")
             return
-
-        text = result.text.strip()
 
         emit("final_transcript", text=text)
 
@@ -382,17 +446,12 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
             device=STATE.model_device,
             model=STATE.model_name_used,
         )
-        LOGGER.info("transcription done in %sms", latency_ms)
+        LOGGER.info("transcription of %.1fs audio done in %sms", len(audio) / SAMPLE_RATE, latency_ms)
     except Exception as exc:
         emit("error", message=f"Transcription failed: {exc}")
         LOGGER.exception("transcription failed")
     finally:
         set_transcribing(False)
-        if temp_path is not None and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except OSError:
-                LOGGER.exception("failed to delete temp audio file")
 
 
 def cancel_current(silent: bool = False) -> None:
@@ -438,6 +497,7 @@ def handle_command(cmd: dict[str, Any]) -> None:
 
     if name == "init":
         emit("ready", device=choose_device(), model=MODEL_NAME)
+        preload_model_in_background()
         return
 
     if name == "start_recording":

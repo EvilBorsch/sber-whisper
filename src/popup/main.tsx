@@ -2,9 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { cancelCurrent, getSettings, hidePopup, openSettings, type AsrEvent } from "../shared/api";
+import { initialPopupState, reducePopup, type PopupState } from "./state";
 import "./popup.css";
-
-type UiState = "listening" | "transcribing" | "inserted" | "empty" | "error";
 
 const BAR_COUNT = 32;
 const CLOSE_ANIMATION_MS = 180;
@@ -12,8 +11,7 @@ const INSERTED_HIDE_MS = 900;
 const EMPTY_HIDE_MS = 1100;
 
 function PopupApp() {
-  const [state, setState] = React.useState<UiState>("listening");
-  const [message, setMessage] = React.useState("");
+  const [state, setState] = React.useState<PopupState>(initialPopupState);
   const [levels, setLevels] = React.useState<number[]>(() => Array<number>(BAR_COUNT).fill(0));
   const [isVisible, setIsVisible] = React.useState(false);
   const [isClosing, setIsClosing] = React.useState(false);
@@ -22,7 +20,7 @@ function PopupApp() {
   const hideTimer = React.useRef<number | null>(null);
   const closeTimer = React.useRef<number | null>(null);
   const errorTimeoutSec = React.useRef(10);
-  const stateRef = React.useRef<UiState>("listening");
+  const stateRef = React.useRef<PopupState>(initialPopupState);
   stateRef.current = state;
 
   const cancelPendingHide = React.useCallback(() => {
@@ -66,57 +64,52 @@ function PopupApp() {
       errorTimeoutSec.current = settings.popup_timeout_sec;
     });
 
+    const show = () => {
+      cancelPendingHide();
+      if (!visibleRef.current) {
+        setShowKey((value) => value + 1);
+      }
+      visibleRef.current = true;
+      setIsVisible(true);
+    };
+
     const setup = async () => {
       const unlisten = await listen<AsrEvent>("asr_event", (event) => {
         const payload = event.payload;
 
+        if (payload.event === "audio_level") {
+          setLevels((prev) => [...prev.slice(1), payload.level ?? 0]);
+          return;
+        }
+        if (payload.event === "job_cancelled") {
+          hideNow();
+          return;
+        }
+
+        const next = reducePopup(stateRef.current, payload);
+        stateRef.current = next;
+        setState(next);
+
+        // Побочные эффекты видимости и таймеров зависят только от пришедшего события.
         switch (payload.event) {
           case "dictation_starting":
           case "recording_started":
-            cancelPendingHide();
             setLevels(Array<number>(BAR_COUNT).fill(0));
-            setState("listening");
-            if (!visibleRef.current) {
-              setShowKey((value) => value + 1);
-            }
-            visibleRef.current = true;
-            setIsVisible(true);
-            break;
-
-          case "audio_level":
-            setLevels((prev) => [...prev.slice(1), payload.level ?? 0]);
-            break;
-
-          case "recording_stopped":
-            setState("transcribing");
+            show();
             break;
 
           case "final_transcript":
-            // Пустой результат ничего не вставляет — коротко показываем это и прячемся.
-            if (!(payload.text ?? "").trim()) {
-              setState("empty");
+            if (next.view === "empty") {
               scheduleHide(EMPTY_HIDE_MS);
             }
             break;
 
           case "text_inserted":
-            setState("inserted");
             scheduleHide(INSERTED_HIDE_MS);
             break;
 
-          case "job_cancelled":
-            hideNow();
-            break;
-
           case "error":
-            cancelPendingHide();
-            setState("error");
-            setMessage(payload.message ?? "Unexpected error");
-            if (!visibleRef.current) {
-              setShowKey((value) => value + 1);
-            }
-            visibleRef.current = true;
-            setIsVisible(true);
+            show();
             scheduleHide(errorTimeoutSec.current * 1000);
             break;
         }
@@ -137,20 +130,25 @@ function PopupApp() {
   }, [cancelPendingHide, hideNow, scheduleHide]);
 
   const onClose = () => {
-    if (stateRef.current === "listening" || stateRef.current === "transcribing") {
+    const { view } = stateRef.current;
+    if (view === "listening" || view === "loading" || view === "transcribing") {
       void cancelCurrent();
     }
     hideNow();
   };
 
+  const { view, message } = state;
+
   return (
     <main className={`shell ${isVisible ? "is-visible" : "is-hidden"} ${isClosing ? "is-closing" : ""}`}>
-      <div className={`pill state-${state}`} key={showKey}>
+      <div className={`pill state-${view}`} key={showKey}>
         <span className="dot" aria-hidden="true" />
 
-        {state === "error" || state === "empty" ? (
-          <p className="message">{state === "empty" ? "No speech detected" : message}</p>
-        ) : state === "inserted" ? (
+        {view === "error" || view === "empty" || view === "loading" ? (
+          <p className="message">
+            {view === "empty" ? "No speech detected" : view === "loading" ? "Loading model…" : message}
+          </p>
+        ) : view === "inserted" ? (
           <span className="inserted-label">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M3 8.5 L6.5 12 L13 4.5" />

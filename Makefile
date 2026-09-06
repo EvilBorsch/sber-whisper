@@ -8,6 +8,9 @@ else
   CLEAN_CMD := rm -rf dist node_modules src-tauri/target
 endif
 
+# Тесты sidecar требуют torch и gigaam — берём venv сборки sidecar, если он уже есть.
+TEST_PYTHON := $(firstword $(wildcard python/.venv-sidecar/bin/python python/.venv-sidecar/Scripts/python.exe) $(PYTHON))
+
 .PHONY: setup dev release release-win release-win-gpu release-mac gpu-sidecar-win clean test
 
 setup:
@@ -40,7 +43,8 @@ release-mac:
 
 test:
 	npm run test
-	$(PYTHON) -m unittest tests/python/test_sidecar.py
+	$(TEST_PYTHON) -m unittest tests/python/test_sidecar.py
+	cd src-tauri && cargo test
 
 clean:
 	$(CLEAN_CMD)

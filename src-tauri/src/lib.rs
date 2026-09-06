@@ -72,7 +72,6 @@ struct SharedState {
     settings: Mutex<AppSettings>,
     sidecar: Mutex<Option<SidecarProcess>>,
     recording_started: AtomicBool,
-    suppress_disconnect_error: AtomicBool,
     shutdown: AtomicBool,
 }
 
@@ -82,7 +81,6 @@ impl SharedState {
             settings: Mutex::new(settings),
             sidecar: Mutex::new(None),
             recording_started: AtomicBool::new(false),
-            suppress_disconnect_error: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -666,17 +664,6 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
 
                     match serde_json::from_str::<Value>(&raw) {
                         Ok(payload) => {
-                            if payload.get("event")
-                                == Some(&Value::String("sidecar_idle_restart".to_string()))
-                            {
-                                let shared = app.state::<SharedState>();
-                                shared
-                                    .suppress_disconnect_error
-                                    .store(true, Ordering::SeqCst);
-                                log_line(&app, "sidecar requested idle restart");
-                                continue;
-                            }
-
                             if payload.get("event") == Some(&Value::String("ready".to_string())) {
                                 log_line(&app, "sidecar ready event received");
                             }
@@ -707,12 +694,8 @@ fn spawn_stdout_reader(app: AppHandle, stdout: ChildStdout) {
 
         let shared = app.state::<SharedState>();
         shared.recording_started.store(false, Ordering::SeqCst);
-        let suppress_disconnect = shared
-            .suppress_disconnect_error
-            .swap(false, Ordering::SeqCst);
-        let shutting_down = shared.shutdown.load(Ordering::SeqCst);
 
-        if !shutting_down && !suppress_disconnect {
+        if !shared.shutdown.load(Ordering::SeqCst) {
             emit_asr_event(
                 &app,
                 &json!({
@@ -735,7 +718,36 @@ fn spawn_stderr_reader(app: AppHandle, stderr: ChildStderr) {
     });
 }
 
+fn write_sidecar_command(proc: &mut SidecarProcess, command: &Value) -> Result<(), String> {
+    let line = format!("{}\n", command);
+    proc.stdin
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("failed to write sidecar command: {e}"))?;
+    proc.stdin
+        .flush()
+        .map_err(|e| format!("failed to flush sidecar command: {e}"))?;
+    Ok(())
+}
+
+fn sidecar_config_command(settings: &AppSettings) -> Value {
+    json!({
+        "command": "set_config",
+        "config": {
+            "language_mode": settings.language_mode.clone(),
+            "popup_timeout_sec": settings.popup_timeout_sec,
+            "model_keepalive_min": settings.model_keepalive_min
+        }
+    })
+}
+
+// Запускает sidecar, если он ещё не запущен или упал. Новому процессу сразу отдаёт
+// init и текущие настройки, иначе после перезапуска он жил бы с дефолтным keepalive.
 fn ensure_sidecar_running(app: &AppHandle, shared: &SharedState) -> Result<(), String> {
+    let settings = shared
+        .settings
+        .lock()
+        .map_err(|_| "failed to lock settings mutex".to_string())?
+        .clone();
     let mut guard = shared
         .sidecar
         .lock()
@@ -757,9 +769,16 @@ fn ensure_sidecar_running(app: &AppHandle, shared: &SharedState) -> Result<(), S
         true
     };
 
-    if needs_restart {
-        *guard = Some(start_sidecar_process(app)?);
+    if !needs_restart {
+        return Ok(());
     }
+
+    // Холодный старт процесса с torch занимает секунды: пилюля покажет загрузку,
+    // а sidecar сам сообщит model_loaded, когда будет готов.
+    emit_asr_event(app, &json!({ "event": "model_loading" }));
+    let proc = guard.insert(start_sidecar_process(app)?);
+    write_sidecar_command(proc, &json!({ "command": "init" }))?;
+    write_sidecar_command(proc, &sidecar_config_command(&settings))?;
 
     Ok(())
 }
@@ -777,15 +796,7 @@ fn send_sidecar_command(app: &AppHandle, command: Value) -> Result<(), String> {
         .as_mut()
         .ok_or_else(|| "sidecar is not available".to_string())?;
 
-    let line = format!("{}\n", command);
-    proc.stdin
-        .write_all(line.as_bytes())
-        .map_err(|e| format!("failed to write sidecar command: {e}"))?;
-    proc.stdin
-        .flush()
-        .map_err(|e| format!("failed to flush sidecar command: {e}"))?;
-
-    Ok(())
+    write_sidecar_command(proc, &command)
 }
 
 fn popup_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R>, String> {
@@ -812,8 +823,8 @@ fn position_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .outer_size()
         .map_err(|e| format!("failed to read popup size: {e}"))?;
 
-    let x = work_area.position.x as f64
-        + (work_area.size.width as f64 - popup_size.width as f64) / 2.0;
+    let x =
+        work_area.position.x as f64 + (work_area.size.width as f64 - popup_size.width as f64) / 2.0;
     let y = work_area.position.y as f64 + work_area.size.height as f64
         - popup_size.height as f64
         - 12.0 * scale;
@@ -852,20 +863,6 @@ fn send_command_or_emit_error(app: &AppHandle, payload: Value) {
         log_line(app, &format!("sidecar command failed: {err}"));
         emit_asr_event(app, &json!({ "event": "error", "message": err }));
     }
-}
-
-fn send_config_to_sidecar(app: &AppHandle, settings: &AppSettings) {
-    send_command_or_emit_error(
-        app,
-        json!({
-            "command": "set_config",
-            "config": {
-                "language_mode": settings.language_mode.clone(),
-                "popup_timeout_sec": settings.popup_timeout_sec,
-                "model_keepalive_min": settings.model_keepalive_min
-            }
-        }),
-    );
 }
 
 // Хоткей-переключатель: первое нажатие начинает запись, второе останавливает и вставляет текст.
@@ -920,7 +917,7 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<AppSettings, S
         *guard = settings.clone();
     }
 
-    send_config_to_sidecar(&app, &settings);
+    send_command_or_emit_error(&app, sidecar_config_command(&settings));
 
     log_line(&app, "settings updated");
     Ok(settings)
@@ -955,17 +952,12 @@ fn cancel_current(app: AppHandle) {
     send_command_or_emit_error(&app, json!({ "command": "cancel_current" }));
 }
 
-fn init_sidecar(app: &AppHandle, settings: &AppSettings) {
+fn init_sidecar(app: &AppHandle) {
     let shared = app.state::<SharedState>();
-
     if let Err(e) = ensure_sidecar_running(app, &shared) {
         log_line(app, &format!("failed to start sidecar at setup: {e}"));
         emit_asr_event(app, &json!({ "event": "error", "message": e }));
-        return;
     }
-
-    send_command_or_emit_error(app, json!({ "command": "init" }));
-    send_config_to_sidecar(app, settings);
 }
 
 fn build_tray(app: &AppHandle) -> Result<(), String> {
@@ -1035,7 +1027,7 @@ fn setup_app(app: &AppHandle) -> Result<(), String> {
     register_shortcut(app, current_hotkey(&settings))?;
     apply_autostart(app, settings.auto_launch)?;
 
-    init_sidecar(app, &settings);
+    init_sidecar(app);
     log_line(app, "application setup complete");
 
     Ok(())

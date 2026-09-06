@@ -5,6 +5,7 @@ Cross-platform desktop voice-to-text app (Windows + macOS) with:
 - Global toggle hotkey (`Ctrl+G` on Windows, `Cmd+G` on macOS): press to start dictation, press again to stop
 - Final text is inserted at the cursor of the focused app (and kept in the clipboard as backup)
 - Compact Wispr Flow-style pill at the bottom of the screen with a live microphone waveform
+- Dictations of any length: audio is split on pauses into chunks the model accepts (GigaAM takes at most 25 s per call)
 - Local-only processing with GigaAM `v3_e2e_rnnt`
 - Bundled Python sidecar in installer (target machine does not need Python)
 
@@ -110,8 +111,17 @@ make release-mac
 Resulting `.dmg` is copied to `artifacts/releases`.
 
 ## Runtime Behavior
-- App starts hidden in tray/top-bar.
+- App starts hidden in tray/top-bar and preloads the ASR model in the background.
 - Press global hotkey to start recording; press again to stop, transcribe and insert text at the cursor.
+- If the model is not in memory yet (first run, or after the keepalive timeout), the pill shows
+  `Loading model…` while the model loads; the waveform appears as soon as the model is ready.
+  After a keepalive unload the microphone already records during the load, so nothing said is lost.
+  Only a cold start of the sidecar process (app launch, or after a crash) delays recording until the
+  process is up, which is why the app preloads the model right after launch.
+- Long dictations are cut into chunks of up to 20 s at the quietest moment of the last 8 s of each window,
+  each chunk is transcribed separately and the texts are joined.
+- When the model is idle longer than the keepalive timeout it is unloaded from memory, but the sidecar
+  process stays alive: restarting Python with torch takes seconds, reloading the model takes about one.
 - The pill popup never takes keyboard focus, so the target app keeps the cursor.
 - Pill hides itself after insertion; errors hide by `popup_timeout_sec` or close click.
 - Audio is written to temp file only during job and immediately deleted after transcription.
@@ -147,18 +157,25 @@ Python sidecar event IPC (stdout JSON lines):
 - `recording_started`
 - `audio_level`
 - `recording_stopped`
+- `model_loading`
+- `model_loaded`
 - `final_transcript`
 - `job_cancelled`
 - `error`
 - `metrics`
 
 The Rust shell additionally emits `dictation_starting` (right on hotkey press, before the
-sidecar answers) and `text_inserted` (after a successful paste) to the popup.
+sidecar answers), `model_loading` (when it has to start the sidecar process) and `text_inserted`
+(after a successful paste) to the popup.
 
 ## Tests
 ```bash
 make test
 ```
+
+`make test` runs the frontend (vitest), Python sidecar (unittest) and Rust (cargo test) suites.
+Python sidecar tests need `torch`, `gigaam`, `soundfile` and `numpy`; `make test` uses `python/.venv-sidecar`
+(created by the sidecar build) when it exists.
 
 ## Troubleshooting
 If popup shows `Model 'v3_e2e_rnnt' not found`, your sidecar was built with old GigaAM.

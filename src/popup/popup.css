@@ -71,7 +71,8 @@ body,
   animation: dot-pulse 1.4s ease-in-out infinite;
 }
 
-.state-transcribing .dot {
+.state-transcribing .dot,
+.state-loading .dot {
   background: var(--busy);
   box-shadow: 0 0 10px rgba(90, 162, 255, 0.85);
   animation-duration: 0.8s;
@@ -125,6 +126,11 @@ body,
 
 .state-error .message {
   color: #ffc3cd;
+}
+
+.state-loading .message {
+  color: var(--text-main);
+  animation: loading-pulse 1.2s ease-in-out infinite;
 }
 
 .inserted-label {
@@ -228,6 +234,17 @@ body,
 
   50% {
     height: 24px;
+    opacity: 1;
+  }
+}
+
+@keyframes loading-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
     opacity: 1;
   }
 }

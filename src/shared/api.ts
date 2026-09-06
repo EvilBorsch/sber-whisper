@@ -14,6 +14,8 @@ export type AsrEventKind =
   | "dictation_starting"
   | "recording_started"
   | "recording_stopped"
+  | "model_loading"
+  | "model_loaded"
   | "audio_level"
   | "final_transcript"
   | "text_inserted"
