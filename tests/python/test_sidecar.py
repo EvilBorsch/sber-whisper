@@ -83,12 +83,16 @@ class SidecarTests(unittest.TestCase):
         asr_service.gigaam.load_model = lambda *_args, **_kwargs: self.fake_model
         self._old_stream = asr_service.sd.InputStream
         asr_service.sd.InputStream = FakeStream
+        # Тесты не должны зависеть от того, стоит ли ffmpeg на машине, где они запускаются.
+        self._old_which = asr_service.shutil.which
+        asr_service.shutil.which = lambda _name: "/fake/ffmpeg"
 
     def tearDown(self) -> None:
         asr_service.cancel_current(silent=True)
         asr_service.emit = self._old_emit
         asr_service.gigaam.load_model = self._old_load_model
         asr_service.sd.InputStream = self._old_stream
+        asr_service.shutil.which = self._old_which
 
     def event_names(self) -> list[str]:
         return [e["event"] for e in self.events if e["event"] != "audio_level"]
@@ -227,6 +231,16 @@ class SidecarTests(unittest.TestCase):
         self.assertEqual(self.event_names()[:2], ["ready", "model_loading"])
         self.wait_for_event("model_loaded")
         self.assertIs(asr_service.STATE.model, self.fake_model)
+
+    def test_init_reports_missing_ffmpeg(self) -> None:
+        """gigaam декодирует аудио внешним ffmpeg: без него лучше сказать об этом сразу, а не [WinError 2] на диктовке."""
+        asr_service.shutil.which = lambda _name: None
+
+        asr_service.handle_command({"command": "init"})
+
+        self.assertEqual(self.event_names()[0], "ready")
+        errors = [e["message"] for e in self.events if e["event"] == "error"]
+        self.assertTrue(any("ffmpeg" in message for message in errors), errors)
 
     def test_idle_timeout_unloads_model_but_keeps_sidecar_alive(self) -> None:
         asr_service.STATE.model = self.fake_model

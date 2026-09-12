@@ -14,6 +14,7 @@ import logging.handlers
 import math
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -42,6 +43,9 @@ import torch
 
 if sys.platform == "darwin":
     os.environ["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
+elif sys.platform == "win32" and getattr(sys, "frozen", False):
+    # Упакованный сайдкар: сборка кладёт ffmpeg.exe рядом с exe, а в PATH пользователя его может не быть.
+    os.environ["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
 
 try:
     import gigaam
@@ -135,6 +139,11 @@ def choose_device() -> str:
     if sys.platform == "darwin":
         return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def ffmpeg_path() -> str | None:
+    """gigaam декодирует аудио внешним ffmpeg; без него распознавание падает с [WinError 2]."""
+    return shutil.which("ffmpeg")
 
 
 def load_model_if_needed() -> None:
@@ -500,6 +509,10 @@ def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -
             model=STATE.model_name_used,
         )
         LOGGER.info("transcription of %.1fs audio done in %sms", len(audio) / SAMPLE_RATE, latency_ms)
+    except FileNotFoundError as exc:
+        # Единственный внешний бинарник на пути распознавания — ffmpeg, который запускает gigaam.load_audio.
+        emit("error", message=f"Transcription failed: ffmpeg not found ({exc})")
+        LOGGER.exception("transcription failed: ffmpeg missing")
     except Exception as exc:
         emit("error", message=f"Transcription failed: {exc}")
         LOGGER.exception("transcription failed")
@@ -550,6 +563,9 @@ def handle_command(cmd: dict[str, Any]) -> None:
 
     if name == "init":
         emit("ready", device=choose_device(), model=MODEL_NAME)
+        if ffmpeg_path() is None:
+            LOGGER.error("ffmpeg not found on PATH or next to the sidecar")
+            emit("error", message="ffmpeg not found: install ffmpeg or put ffmpeg.exe next to sber-whisper-sidecar.exe")
         preload_model_in_background()
         return
 

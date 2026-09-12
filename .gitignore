@@ -6,6 +6,8 @@ template/
 python/.venv-sidecar/
 python/build/
 python/dist/sber-whisper-sidecar/
+python/.ffmpeg-cache/
+artifacts/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

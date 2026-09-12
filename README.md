@@ -24,8 +24,14 @@ is granted, text is only copied to the clipboard.
 - Node.js 20+
 - Rust toolchain (stable)
 - Python 3.10+
-- Windows only: Visual Studio 2022 with `Desktop development with C++` and Windows 10/11 SDK
-- On Windows with CUDA: NVIDIA drivers + CUDA-compatible PyTorch build
+- `ffmpeg` — GigaAM decodes audio through it. On Windows the sidecar build bundles `ffmpeg.exe`
+  next to the sidecar automatically: it takes `FFMPEG_EXE` if set, then `ffmpeg` from `PATH`,
+  otherwise downloads the essentials build from gyan.dev into `python/.ffmpeg-cache`
+- Windows only: Visual Studio 2022 with `Desktop development with C++` and Windows 10/11 SDK.
+  Any edition works, Build Tools are enough; scripts locate it via `vswhere` (override with `VSDEVCMD`)
+- On Windows with CUDA: NVIDIA drivers. The GPU sidecar uses `torch 2.8.0+cu128`, which also covers RTX 50xx (`sm_120`)
+- `make` is optional on Windows: every target is a script you can run directly, e.g.
+  `cmd /c scripts\windows-tauri-build.cmd` or `cmd /c scripts\windows-build-gpu-portable.cmd`
 
 Only the build machine needs Python. End users install via `.exe`/`.dmg` and do not need Python.
 
@@ -72,7 +78,10 @@ make release-mac
 ```
 
 ## Optional Windows GPU Build
-GPU variant is separate from installer build.
+GPU variant is separate from installer build: the sidecar with CUDA libraries weighs ~4.4 GB and
+NSIS cannot produce installers above 2 GB (`makensis: error mmapping file ... is out of range`),
+so the GPU build is portable-only. The zip is also above GitHub's 2 GB release-asset limit, share it elsewhere
+(set `SKIP_ZIP=1` to keep only the folder).
 
 Build GPU portable package (no installer):
 ```bash
@@ -181,6 +190,11 @@ Python sidecar tests need `torch`, `gigaam`, `soundfile` and `numpy`; `make test
 (created by the sidecar build) when it exists.
 
 ## Troubleshooting
+If popup shows `Transcription failed: [WinError 2] Не удается найти указанный файл`, the sidecar cannot
+find `ffmpeg`: GigaAM runs it to decode the recording. Make sure `ffmpeg.exe` sits next to
+`sber-whisper-sidecar.exe` (rebuild the sidecar, or copy it there by hand). The sidecar also reports
+`ffmpeg not found` on `init` in this case.
+
 If popup shows `Model 'v3_e2e_rnnt' not found`, your sidecar was built with old GigaAM.
 Rebuild sidecar and rerun debug/release build:
 
