@@ -6,6 +6,7 @@ Cross-platform desktop voice-to-text app (Windows + macOS) with:
 - Final text is inserted at the cursor of the focused app (and kept in the clipboard as backup)
 - Compact Wispr Flow-style pill at the bottom of the screen with a live microphone waveform
 - Dictations of any length: audio is split on pauses into chunks the model accepts (GigaAM takes at most 25 s per call)
+- Filler words are stripped from the result: hesitations (`э`, `эм`, `мм`, `а-а`, `м-м`) and words like `ну`, `типа`, `как бы`, `короче`, `вот`; punctuation and sentence capitalization are repaired
 - Local-only processing with GigaAM `v3_e2e_rnnt`
 - Bundled Python sidecar in installer (target machine does not need Python)
 
@@ -120,6 +121,8 @@ Resulting `.dmg` is copied to `artifacts/releases`.
   process is up, which is why the app preloads the model right after launch.
 - Long dictations are cut into chunks of up to 20 s at the quietest moment of the last 8 s of each window,
   each chunk is transcribed separately and the texts are joined.
+- The joined text is cleaned from filler words before insertion (the list lives in `FILLER_PHRASES`
+  and `HESITATION_RE` in `python/asr_service.py`). A dictation that consisted only of fillers inserts nothing.
 - When the model is idle longer than the keepalive timeout it is unloaded from memory, but the sidecar
   process stays alive: restarting Python with torch takes seconds, reloading the model takes about one.
 - The pill popup never takes keyboard focus, so the target app keeps the cursor.

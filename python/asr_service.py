@@ -13,6 +13,7 @@ import logging
 import logging.handlers
 import math
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -60,6 +61,12 @@ CHUNK_MAX_SEC = 20.0
 CHUNK_CUT_SEARCH_SEC = 8.0
 CHUNK_CUT_FRAME_SEC = 0.02
 LEVEL_EMIT_INTERVAL_SEC = 0.066
+# Заминки вроде «э», «эм», «мм», «хм», «а-а», «м-м». Одиночные «а», «у», «м» не трогаем:
+# это союз, предлог и метры.
+HESITATION_RE = re.compile(r"^(?:э+м*|м{2,}|хм+|[эмау]+(?:-[эмау]+)+)$")
+FILLER_PHRASES = ("ну", "типа", "как бы", "короче", "вот", "в общем", "это самое", "так сказать", "блин")
+WORD_PUNCT = ".,!?;:…«»\"()-—–"
+SENTENCE_END = ".!?…"
 GIGAAM_GITHUB_REF = "https://github.com/salute-developers/GigaAM"
 
 
@@ -396,7 +403,53 @@ def transcribe_audio(audio: np.ndarray, cancel_event: threading.Event) -> str | 
 
     if cancel_event.is_set():
         return None
-    return " ".join(texts)
+    return clean_transcript(" ".join(texts))
+
+
+def clean_transcript(text: str) -> str:
+    """Убирает заминки и слова-паразиты, сохраняя пунктуацию и заглавные буквы предложений.
+
+    Текст режется на токены «слово + знаки». Точка или вопрос с удалённого токена переезжает
+    на предыдущее оставленное слово, запятая просто выбрасывается.
+    """
+    fillers = sorted((phrase.split() for phrase in FILLER_PHRASES), key=len, reverse=True)
+    tokens = text.split()
+    words = [token.strip(WORD_PUNCT).lower() for token in tokens]
+
+    kept: list[str] = []
+    capitalize_next = False
+    i = 0
+    while i < len(tokens):
+        span = 0
+        if HESITATION_RE.match(words[i]):
+            span = 1
+        else:
+            for phrase in fillers:
+                crosses_sentence = any(token[-1] in SENTENCE_END for token in tokens[i : i + len(phrase) - 1])
+                if words[i : i + len(phrase)] == phrase and not crosses_sentence:
+                    span = len(phrase)
+                    break
+
+        if span == 0:
+            token = tokens[i]
+            if capitalize_next:
+                token = token[:1].upper() + token[1:]
+                capitalize_next = False
+            kept.append(token)
+            i += 1
+            continue
+
+        # Удалили начало предложения — заглавную букву получит следующее оставленное слово.
+        if not kept or kept[-1][-1] in SENTENCE_END:
+            capitalize_next = True
+
+        last = tokens[i + span - 1]
+        sentence_end = [c for c in last[len(last.rstrip(WORD_PUNCT)) :] if c in SENTENCE_END]
+        if sentence_end and kept and kept[-1][-1] not in SENTENCE_END:
+            kept[-1] = kept[-1].rstrip(",;:") + sentence_end[0]
+        i += span
+
+    return " ".join(kept)
 
 
 def transcribe_worker(frames: list[np.ndarray], cancel_event: threading.Event) -> None:

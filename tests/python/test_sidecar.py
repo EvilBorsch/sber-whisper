@@ -35,6 +35,7 @@ class FakeModel:
     def __init__(self) -> None:
         self.chunk_durations: list[float] = []
         self.on_transcribe: Callable[[], None] = lambda: None
+        self.text: str | None = None
 
     def transcribe(self, wav_path: str) -> FakeResult:
         self.on_transcribe()
@@ -43,7 +44,7 @@ class FakeModel:
         if duration > MODEL_LIMIT_SEC:
             raise ValueError("Too long wav file, use 'transcribe_longform' method.")
         self.chunk_durations.append(duration)
-        return FakeResult(f"chunk{len(self.chunk_durations)}")
+        return FakeResult(self.text if self.text is not None else f"chunk{len(self.chunk_durations)}")
 
 
 class FakeStream:
@@ -153,6 +154,47 @@ class SidecarTests(unittest.TestCase):
 
         # Хвост в пару сотен миллисекунд модель не распознает — он приклеивается к предыдущему куску.
         self.assertEqual([len(c) for c in chunks], [len(audio)])
+
+    def test_final_transcript_has_filler_words_removed(self) -> None:
+        asr_service.STATE.model = self.fake_model
+        self.fake_model.text = (
+            "У меня тут где-то есть мой проект, а-а, нужно его доработать, чтобы убирались всякие м-м ну и "
+            "другие слова-паразиты, типа там всё остальное. Ну, то есть а-а, он текст считывает, "
+            "а копирует уже чистый текст. Э-э, вот."
+        )
+
+        asr_service.transcribe_worker([speech_with_pauses(3.0, 1.0, 0.1)], threading.Event())
+
+        self.assertEqual(
+            [e["text"] for e in self.events if e["event"] == "final_transcript"],
+            [
+                "У меня тут где-то есть мой проект, нужно его доработать, чтобы убирались всякие и "
+                "другие слова-паразиты, там всё остальное. То есть он текст считывает, "
+                "а копирует уже чистый текст."
+            ],
+        )
+
+    def test_clean_transcript_business_cases(self) -> None:
+        cases = {
+            # Заминка в начале предложения: следующее слово становится заглавным.
+            "Ммм, поехали дальше.": "Поехали дальше.",
+            "Э-э, привет. Эм, как дела?": "Привет. Как дела?",
+            # Паразит в конце предложения: точка переезжает на предыдущее слово.
+            "Сделаем так, короче.": "Сделаем так.",
+            "Это как бы понятно, да?": "Это понятно, да?",
+            # Союз «а», предлог «у» и единица «м» — не заминки.
+            "Я пошёл, а он остался у дома в 5 м от входа.": "Я пошёл, а он остался у дома в 5 м от входа.",
+            # Паразит внутри слова не трогаем.
+            "Нужно вотировать и типизировать блинчики.": "Нужно вотировать и типизировать блинчики.",
+            # Многословная фраза не склеивается через границу предложений.
+            "Скажи как. Бы ты решил?": "Скажи как. Бы ты решил?",
+            # Одни заминки — пустой результат, вставка не произойдёт.
+            "Ну, э-э, м-м.": "",
+            "": "",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(asr_service.clean_transcript(raw), expected)
 
     def test_cancel_while_model_is_busy_drops_result(self) -> None:
         asr_service.STATE.model = self.fake_model
