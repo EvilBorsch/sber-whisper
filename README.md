@@ -29,9 +29,9 @@ is granted, text is only copied to the clipboard.
   otherwise downloads the essentials build from gyan.dev into `python/.ffmpeg-cache`
 - Windows only: Visual Studio 2022 with `Desktop development with C++` and Windows 10/11 SDK.
   Any edition works, Build Tools are enough; scripts locate it via `vswhere` (override with `VSDEVCMD`)
-- On Windows with CUDA: NVIDIA drivers. The GPU sidecar uses `torch 2.8.0+cu128`, which also covers RTX 50xx (`sm_120`)
+- Windows recognition runs on CPU with `torch 2.8.0+cpu`; no NVIDIA GPU or CUDA drivers are required.
 - `make` is optional on Windows: every target is a script you can run directly, e.g.
-  `cmd /c scripts\windows-tauri-build.cmd` or `cmd /c scripts\windows-build-gpu-portable.cmd`
+  `cmd /c scripts\windows-tauri-build.cmd` or `cmd /c scripts\windows-build-portable.cmd`
 
 Only the build machine needs Python. End users install via `.exe`/`.dmg` and do not need Python.
 
@@ -53,12 +53,6 @@ This builds a local debug exe with embedded frontend and runs:
 
 By default, this command rebuilds the sidecar every run, so dependency updates are applied.
 
-For local GPU debug sidecar build:
-
-```bash
-set SIDECAR_VARIANT=gpu && npm run run-local-win
-```
-
 ## Build Artifacts
 `make release` builds for the current host OS:
 - Windows host -> NSIS `.exe`
@@ -69,7 +63,8 @@ Output artifacts are copied to `artifacts/releases`.
 The release build first creates a standalone ASR sidecar binary (`sber-whisper-sidecar`) and
 embeds it into the installer resources, so you can share just the installer file.
 
-Windows installer is CPU-first by default, so resulting `setup.exe` stays smaller and stable for sharing.
+Windows builds use CPU-only PyTorch pinned in `python/requirements-windows.txt`.
+The sidecar is a directory bundle, avoiding torch extraction on each process launch.
 
 Manual targets:
 ```bash
@@ -77,29 +72,24 @@ make release-win
 make release-mac
 ```
 
-## Optional Windows GPU Build
-GPU variant is separate from installer build: the sidecar with CUDA libraries weighs ~4.4 GB and
-NSIS cannot produce installers above 2 GB (`makensis: error mmapping file ... is out of range`),
-so the GPU build is portable-only. The zip is also above GitHub's 2 GB release-asset limit, share it elsewhere
-(set `SKIP_ZIP=1` to keep only the folder).
-
-Build GPU portable package (no installer):
+## Windows Portable Build
+Build the CPU portable package:
 ```bash
-make release-win-gpu
+make release-win-portable
 ```
 
 Result:
-- folder: `artifacts/releases/sber-whisper-gpu-portable-win-x64`
-- zip: `artifacts/releases/sber-whisper-gpu-portable-win-x64.zip`
+- folder: `artifacts/releases/sber-whisper-cpu-portable-win-x64`
+- zip: `artifacts/releases/sber-whisper-cpu-portable-win-x64.zip`
 
-Run GPU portable build:
+Run the portable build:
 1. Unzip package.
 2. Keep `sber-whisper.exe` and `sber-whisper-sidecar/` in the same folder.
 3. Start `sber-whisper.exe`.
 
-Build only GPU sidecar (without packaging):
+Build only the CPU sidecar:
 ```bash
-make gpu-sidecar-win
+powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows
 ```
 
 ## Build On macOS
@@ -142,7 +132,7 @@ Resulting `.dmg` is copied to `artifacts/releases`.
 Settings window supports:
 - Hotkey
 - Popup auto-hide timeout (applies to error messages; success hides automatically)
-- Model keepalive timeout (minutes before ASR model unloads from RAM/VRAM when idle)
+- Model keepalive timeout (minutes before ASR model unloads from RAM when idle)
 - Launch at login toggle
 
 Settings are stored in app config directory as `app_settings.json`.
@@ -189,6 +179,12 @@ make test
 Python sidecar tests need `torch`, `gigaam`, `soundfile` and `numpy`; `make test` uses `python/.venv-sidecar`
 (created by the sidecar build) when it exists.
 
+The Windows overlay regression checks native WebView2 visibility after revealing a hidden popup:
+
+```bash
+cmd /c "call scripts\windows-vs-env.cmd && cargo run --manifest-path src-tauri/Cargo.toml --release --bin overlay-regression"
+```
+
 ## Troubleshooting
 If popup shows `Transcription failed: [WinError 2] Не удается найти указанный файл`, the sidecar cannot
 find `ffmpeg`: GigaAM runs it to decode the recording. Make sure `ffmpeg.exe` sits next to
@@ -200,12 +196,6 @@ Rebuild sidecar and rerun debug/release build:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows
-```
-
-If you want forced GPU sidecar build:
-
-```bash
-powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant gpu
 ```
 
 ## License

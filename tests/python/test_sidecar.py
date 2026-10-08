@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from collections.abc import Callable
 from pathlib import Path
 
@@ -70,6 +71,26 @@ def speech_with_pauses(total_sec: float, pause_every_sec: float, pause_sec: floa
     for start in range(period, len(audio), period):
         audio[start : start + pause] = 0.0
     return audio
+
+
+class DeviceSelectionTests(unittest.TestCase):
+    def test_windows_uses_cpu_even_when_cuda_is_available(self) -> None:
+        with patch.object(asr_service.sys, "platform", "win32"), patch.object(
+            asr_service.torch.cuda, "is_available", return_value=True
+        ):
+            self.assertEqual(asr_service.choose_device(), "cpu")
+
+    def test_macos_uses_cpu(self) -> None:
+        with patch.object(asr_service.sys, "platform", "darwin"), patch.object(
+            asr_service.torch.cuda, "is_available", return_value=True
+        ):
+            self.assertEqual(asr_service.choose_device(), "cpu")
+
+    def test_linux_can_use_cuda(self) -> None:
+        with patch.object(asr_service.sys, "platform", "linux"), patch.object(
+            asr_service.torch.cuda, "is_available", return_value=True
+        ):
+            self.assertEqual(asr_service.choose_device(), "cuda")
 
 
 class SidecarTests(unittest.TestCase):

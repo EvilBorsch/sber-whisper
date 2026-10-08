@@ -1,83 +1,62 @@
 param(
   [ValidateSet("windows", "macos")]
-  [string]$Platform = "windows",
-  [ValidateSet("cpu", "gpu")]
-  [string]$Variant = "cpu"
+  [string]$Platform = "windows"
 )
 
 $ErrorActionPreference = "Stop"
 
-$repo = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $venv = Join-Path $repo "python\.venv-sidecar"
 $distRoot = Join-Path $repo "python\dist"
 $distDir = Join-Path $distRoot "sber-whisper-sidecar"
 $buildDir = Join-Path $repo "python\build"
 $scriptPath = Join-Path $repo "python\asr_service.py"
-$torchIndex = "https://download.pytorch.org/whl/cu128"
-$torchGpuVersion = "2.8.0+cu128"
 
-if (!(Test-Path $scriptPath)) {
-  throw "Missing sidecar source: $scriptPath"
+if (!(Test-Path $scriptPath)) { throw "Missing sidecar source: $scriptPath" }
+
+# Check the absolute targets before recursively clearing generated files.
+$pythonRoot = [System.IO.Path]::GetFullPath((Join-Path $repo "python")) + [System.IO.Path]::DirectorySeparatorChar
+foreach ($target in @($distDir, $buildDir)) {
+  if (![System.IO.Path]::GetFullPath($target).StartsWith($pythonRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Build output must stay inside $pythonRoot"
+  }
 }
 
 if (!(Test-Path $venv)) {
   python -m venv $venv
+  if ($LASTEXITCODE -ne 0) { throw "Failed to create sidecar venv" }
 }
 
 $py = Join-Path $venv "Scripts\python.exe"
-if (!(Test-Path $py)) {
-  throw "Python executable not found in venv: $py"
-}
+if (!(Test-Path $py)) { throw "Python executable not found in venv: $py" }
 
 & $py -m pip install --upgrade pip wheel setuptools
+if ($LASTEXITCODE -ne 0) { throw "Failed to update build tools" }
+$requirementsName = if ($Platform -eq "windows") { "requirements-windows.txt" } else { "requirements.txt" }
+& $py -m pip install -r (Join-Path $repo "python\$requirementsName") pyinstaller
+if ($LASTEXITCODE -ne 0) { throw "Failed to install sidecar dependencies" }
 
-$requirements = Join-Path $repo "python\requirements.txt"
-if ($Variant -eq "gpu") {
-  # requirements.txt pins CPU torch 2.5.1. Installing it only to replace it with cu128 right away costs
-  # an extra 3.5 GB per run, so install CUDA torch first (skipped when already present), then the rest
-  # without the torch pins. gigaam itself does not pin torch (only in extras), so the order is safe.
-  $installed = & $py -c "import importlib.util as u; print(__import__('torch').__version__ if u.find_spec('torch') else 'none')"
-  if ($installed -eq $torchGpuVersion) {
-    Write-Output "torch $torchGpuVersion already installed, skipping"
-  } else {
-    & $py -m pip install --index-url $torchIndex "torch==$torchGpuVersion" "torchaudio==$torchGpuVersion"
-  }
-  $requirements = [System.IO.Path]::GetTempFileName()
-  Get-Content (Join-Path $repo "python\requirements.txt") | Where-Object { $_ -notmatch '^torch(audio)?\s*==' } | Set-Content $requirements
-}
-& $py -m pip install -r $requirements pyinstaller
-if ($Variant -eq "gpu") {
-  Remove-Item -Force $requirements
+if ($Platform -eq "windows") {
+  & $py -c "import torch, torchaudio; assert torch.__version__ == '2.8.0+cpu' and torchaudio.__version__ == '2.8.0+cpu' and torch.version.cuda is None, 'Windows requires CPU-only PyTorch'"
+  if ($LASTEXITCODE -ne 0) { throw "CPU-only dependency verification failed" }
 }
 
-# gigaam decodes audio with an external ffmpeg; without it the packaged sidecar fails on the first dictation.
-# Resolve it before packaging so a missing ffmpeg/network surfaces before the long PyInstaller run.
+# Resolve ffmpeg before packaging: GigaAM needs it for the first dictation.
 $ffmpeg = $null
 if ($Platform -eq "windows") {
   $ffmpeg = & (Join-Path $PSScriptRoot "ensure-ffmpeg.ps1")
 }
 
-Get-Process sber-whisper-sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
-
-if (Test-Path $distDir) {
-  Remove-Item -Recurse -Force $distDir
-}
-if (Test-Path $buildDir) {
-  Remove-Item -Recurse -Force $buildDir
-}
+if (Test-Path $distDir) { Remove-Item -LiteralPath $distDir -Recurse -Force }
+if (Test-Path $buildDir) { Remove-Item -LiteralPath $buildDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
-$packMode = if ($Variant -eq "gpu") { "--onedir" } else { "--onefile" }
-$distPath = if ($Variant -eq "gpu") { $distRoot } else { $distDir }
-
+# A directory bundle starts without extracting torch on every process launch.
 $cmd = @(
   "-m", "PyInstaller",
-  "--noconfirm",
-  "--clean",
-  $packMode,
+  "--noconfirm", "--clean", "--onedir",
   "--name", "sber-whisper-sidecar",
-  "--distpath", $distPath,
+  "--distpath", $distRoot,
   "--workpath", $buildDir,
   "--specpath", $buildDir,
   "--collect-all", "gigaam",
@@ -87,24 +66,15 @@ $cmd = @(
   "--collect-binaries", "soundfile",
   $scriptPath
 )
-
 & $py @cmd
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 $binName = if ($Platform -eq "windows") { "sber-whisper-sidecar.exe" } else { "sber-whisper-sidecar" }
-$binPath = if ($Variant -eq "gpu") {
-  Join-Path $distDir $binName
-} else {
-  Join-Path $distDir $binName
-}
-if (!(Test-Path $binPath)) {
-  throw "Sidecar binary was not created: $binPath"
-}
+$binPath = Join-Path $distDir $binName
+if (!(Test-Path $binPath)) { throw "Sidecar binary was not created: $binPath" }
 
 if ($ffmpeg) {
-  # Next to the exe: CreateProcess searches the calling exe's directory first, so PATH is not needed.
-  Copy-Item $ffmpeg (Join-Path $distDir "ffmpeg.exe") -Force
+  Copy-Item -LiteralPath $ffmpeg -Destination (Join-Path $distDir "ffmpeg.exe") -Force
   Write-Output "Bundled ffmpeg: $ffmpeg"
 }
-
-Write-Output "Built sidecar: $binPath"
-Write-Output "Build variant: $Variant"
+Write-Output "Built sidecar: $binPath (CPU)"

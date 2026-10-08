@@ -1,5 +1,6 @@
 param(
-  [string]$Name = "sber-whisper-gpu-portable-win-x64"
+  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]*$')]
+  [string]$Name = "sber-whisper-cpu-portable-win-x64"
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +11,12 @@ $sidecar = Join-Path $repo "python\dist\sber-whisper-sidecar"
 $outRoot = Join-Path $repo "artifacts\releases"
 $outDir = Join-Path $outRoot $Name
 $zip = "$outDir.zip"
+
+$resolvedOutDir = [System.IO.Path]::GetFullPath($outDir)
+$resolvedOutRoot = [System.IO.Path]::GetFullPath($outRoot) + [System.IO.Path]::DirectorySeparatorChar
+if (!$resolvedOutDir.StartsWith($resolvedOutRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Portable output must stay inside $outRoot"
+}
 
 foreach ($required in @($exe, (Join-Path $sidecar "sber-whisper-sidecar.exe"), (Join-Path $sidecar "ffmpeg.exe"))) {
   if (!(Test-Path $required)) { throw "Missing build output: $required" }
@@ -25,8 +32,9 @@ Copy-Item $exe $outDir
 New-Item -ItemType Directory -Force -Path (Join-Path $outDir "_up_\python") | Out-Null
 Copy-Item (Join-Path $repo "python\asr_service.py") (Join-Path $outDir "_up_\python")
 Copy-Item (Join-Path $repo "python\requirements.txt") (Join-Path $outDir "_up_\python")
+Copy-Item (Join-Path $repo "python\requirements-windows.txt") (Join-Path $outDir "_up_\python")
 # The app looks for <exe dir>\sber-whisper-sidecar\sber-whisper-sidecar.exe (find_sidecar_binary in lib.rs).
-# robocopy: 4+ GB of small files, Copy-Item -Recurse is noticeably slower at this size.
+# Copy the complete PyInstaller directory, including its dependency libraries.
 & robocopy $sidecar (Join-Path $outDir "sber-whisper-sidecar") /E /NFL /NDL /NJH /NJS /NP /MT:8 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
 

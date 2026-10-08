@@ -1,9 +1,11 @@
 ifeq ($(OS),Windows_NT)
   PYTHON := python
+  REQUIREMENTS := python/requirements-windows.txt
   COPY_SCRIPT := powershell -ExecutionPolicy Bypass -File scripts/copy-artifacts.ps1
   CLEAN_CMD := powershell -Command "if (Test-Path dist) { Remove-Item -Recurse -Force dist }; if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }; if (Test-Path src-tauri/target) { Remove-Item -Recurse -Force src-tauri/target }"
 else
   PYTHON := python3.11
+  REQUIREMENTS := python/requirements.txt
   COPY_SCRIPT := bash scripts/copy-artifacts.sh
   CLEAN_CMD := rm -rf dist node_modules src-tauri/target
 endif
@@ -11,11 +13,11 @@ endif
 # Тесты sidecar требуют torch и gigaam — берём venv сборки sidecar, если он уже есть.
 TEST_PYTHON := $(firstword $(wildcard python/.venv-sidecar/bin/python python/.venv-sidecar/Scripts/python.exe) $(PYTHON))
 
-.PHONY: setup dev release release-win release-win-gpu release-mac gpu-sidecar-win clean test
+.PHONY: setup dev release release-win release-win-portable release-mac clean test
 
 setup:
 	npm install
-	$(PYTHON) -m pip install -r python/requirements.txt
+	$(PYTHON) -m pip install -r $(REQUIREMENTS)
 
 dev:
 	npm run tauri dev
@@ -30,11 +32,8 @@ endif
 release-win:
 	cmd /c scripts\\windows-tauri-build.cmd
 
-release-win-gpu:
-	cmd /c scripts\\windows-build-gpu-portable.cmd
-
-gpu-sidecar-win:
-	powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant gpu
+release-win-portable:
+	cmd /c scripts\\windows-build-portable.cmd
 
 release-mac:
 	bash scripts/build-sidecar.sh

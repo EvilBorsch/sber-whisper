@@ -3,7 +3,7 @@ logs
 *.log
 __pycache__/
 template/
-python/.venv-sidecar/
+python/.venv-*/
 python/build/
 python/dist/sber-whisper-sidecar/
 python/.ffmpeg-cache/

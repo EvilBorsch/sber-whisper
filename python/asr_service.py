@@ -136,7 +136,7 @@ def emit(event: str, **payload: Any) -> None:
 
 
 def choose_device() -> str:
-    if sys.platform == "darwin":
+    if sys.platform in {"darwin", "win32"}:
         return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 

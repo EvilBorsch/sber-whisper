@@ -8,7 +8,7 @@ cd /d "%~dp0.."
 taskkill /IM sber-whisper.exe /F >nul 2>nul
 taskkill /IM sber-whisper-sidecar.exe /F >nul 2>nul
 
-powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows -Variant cpu
+powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1 -Platform windows
 if errorlevel 1 exit /b %errorlevel%
 
 rem npm is npm.cmd: without `call` control never returns to this script.

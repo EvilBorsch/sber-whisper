@@ -839,14 +839,25 @@ fn position_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
-fn show_popup(app: &AppHandle) {
+pub fn show_popup(app: &AppHandle) {
     if let Ok(popup) = popup_window(app) {
         if let Err(e) = position_popup(app) {
             log_line(app, &format!("popup positioning error: {e}"));
         }
 
         // Окно показывается без фокуса, чтобы вставка ушла в приложение с курсором.
-        let _ = popup.show();
+        if let Err(e) = popup.show() {
+            log_line(app, &format!("popup show error: {e}"));
+        }
+        // On Windows the native window and WebView2 controller have independent
+        // visibility. Showing only the parent can leave the popup transparent.
+        #[cfg(target_os = "windows")]
+        {
+            let webview: &tauri::Webview = popup.as_ref();
+            if let Err(e) = webview.show() {
+                log_line(app, &format!("popup webview show error: {e}"));
+            }
+        }
     }
 }
 
