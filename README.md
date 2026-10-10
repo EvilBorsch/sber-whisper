@@ -185,6 +185,15 @@ The Windows overlay regression checks native WebView2 visibility after revealing
 cmd /c "call scripts\windows-vs-env.cmd && cargo run --manifest-path src-tauri/Cargo.toml --release --bin overlay-regression"
 ```
 
+The page lifecycle regression requires Node.js 22+ and exercises three suspend/resume cycles with the real popup frontend:
+
+```bash
+cmd /c scripts\windows-test-overlay.cmd
+```
+
+It uses an isolated WebView2 profile, checks that the popup stays unfocused, and opens a
+temporary local debugging port (9227). It simulates page suspension without putting Windows to sleep.
+
 ## Troubleshooting
 If popup shows `Transcription failed: [WinError 2] Не удается найти указанный файл`, the sidecar cannot
 find `ffmpeg`: GigaAM runs it to decode the recording. Make sure `ffmpeg.exe` sits next to

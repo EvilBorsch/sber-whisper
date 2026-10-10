@@ -845,6 +845,17 @@ pub fn show_popup(app: &AppHandle) {
             log_line(app, &format!("popup positioning error: {e}"));
         }
 
+        // After suspension WebView2 can keep a hidden page even when its controller
+        // already reports visible. A false -> true transition restores its lifecycle;
+        // repeating show() alone does not. Neither operation requests keyboard focus.
+        #[cfg(target_os = "windows")]
+        {
+            let webview: &tauri::Webview = popup.as_ref();
+            if let Err(e) = webview.hide() {
+                log_line(app, &format!("popup webview visibility reset error: {e}"));
+            }
+        }
+
         // Окно показывается без фокуса, чтобы вставка ушла в приложение с курсором.
         if let Err(e) = popup.show() {
             log_line(app, &format!("popup show error: {e}"));
@@ -861,8 +872,15 @@ pub fn show_popup(app: &AppHandle) {
     }
 }
 
-fn hide_popup_inner(app: &AppHandle) -> Result<(), String> {
+pub fn hide_popup_inner(app: &AppHandle) -> Result<(), String> {
     let popup = popup_window(app)?;
+    #[cfg(target_os = "windows")]
+    {
+        let webview: &tauri::Webview = popup.as_ref();
+        if let Err(e) = webview.hide() {
+            log_line(app, &format!("popup webview hide error: {e}"));
+        }
+    }
     popup
         .hide()
         .map_err(|e| format!("failed to hide popup: {e}"))?;
@@ -1003,8 +1021,10 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
 }
 
 fn setup_windows(app: &AppHandle) {
+    if let Err(e) = hide_popup_inner(app) {
+        log_line(app, &format!("popup initial hide error: {e}"));
+    }
     if let Ok(popup) = popup_window(app) {
-        let _ = popup.hide();
         let _ = popup.set_always_on_top(true);
     }
 

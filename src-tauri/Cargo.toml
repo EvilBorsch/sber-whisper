@@ -1,6 +1,6 @@
 [package]
 name = "sber-whisper"
-version = "0.3.2"
+version = "0.3.3"
 default-run = "sber-whisper"
 description = "Sber Whisper desktop voice-to-text app"
 authors = ["pingv"]
